@@ -43,7 +43,7 @@ Options:
 
 ## Benchmark 1: Bunny 
 In this first benchmark we test the impact of varying resolution (pixel area) against computed projected area and note execution times. 
-We use the stanford bunny geometry for fun.
+We use the [stanford bunny geometry](https://docs.pyvista.org/api/examples/_autosummary/pyvista.examples.downloads.download_bunny.html#pyvista.examples.downloads.download_bunny) for fun.
 
 <div align="center" style="background-color: white; padding: 10px;">
   <img src="https://github.com/user-attachments/assets/eaefb062-e3fc-403a-8bed-a19a79b1a1dd" width="80%" />
