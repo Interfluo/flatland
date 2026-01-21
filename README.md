@@ -56,12 +56,12 @@ Primary take-away is that the projected area calculation converges as expected a
     <!-- Left Image -->
     <td align="center" style="background-color: white; border: none; padding: 10px; width: 50%;">
       <img src="https://github.com/user-attachments/assets/a425288f-d986-4660-914c-7a2a5031622b" width="100%" />
-      <p style="color: black; margin-top: 10px;">Projected Area error vs pixel area for Bunnyn</p>
+      <p style="color: black; margin-top: 10px;">Projected Area error for Bunnyn</p>
     </td>
     <!-- Right Image -->
     <td align="center" style="background-color: white; border: none; padding: 10px; width: 50%;">
       <img src="https://github.com/user-attachments/assets/2c9f6436-a825-4480-8ccc-06277a2f9989" width="100%" />
-      <p style="color: black; margin-top: 10px;">Execution time vs pixel area for Bunny</p>
+      <p style="color: black; margin-top: 10px;">Execution time for Bunny</p>
     </td>
   </tr>
 </table>
@@ -81,12 +81,12 @@ In this benchamrk we see that the cases exponentially converge towards the corre
     <!-- Left Image -->
     <td align="center" style="background-color: white; border: none; padding: 10px; width: 50%;">
       <img src="https://github.com/user-attachments/assets/8c09d227-fee3-42be-9b14-3b63958bc537" width="100%" />
-      <p style="color: black; margin-top: 10px;">Projected Area error vs pixel area for Bunnyn</p>
+      <p style="color: black; margin-top: 10px;">Projected Area error for Icosphere</p>
     </td>
     <!-- Right Image -->
     <td align="center" style="background-color: white; border: none; padding: 10px; width: 50%;">
       <img src="https://github.com/user-attachments/assets/17a51518-9d43-4bd4-857f-b6e737c47705" width="100%" />
-      <p style="color: black; margin-top: 10px;">Execution time vs pixel area for Bunny</p>
+      <p style="color: black; margin-top: 10px;">Execution time for Icosphere</p>
     </td>
   </tr>
 </table>
