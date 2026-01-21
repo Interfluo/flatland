@@ -1,5 +1,9 @@
 # Flat-land
-Computes the projected area of an input obj mesh from any view angle using a rasterization based technique with dynamic windowing. Tool has been validated and benchmarked on a few datasets shown below.
+FlatLand is a modular C++ utility designed for the geometric analysis and visualization of 3D models via orthographic projection and rasterization. The tool primarily focuses on computing the projected silhouette and visible surface area of 3D meshes (loaded via the OBJ file format) from arbitrary viewing angles. It utilizes a custom Z-buffer implementation to handle occlusions and depth testing, ensuring that only the forward-most surfaces contribute to the final calculations.
+
+Technically, the tool functions by transforming 3D triangles into a 2D coordinate system defined by a user-specified "view normal." Once projected, the software performs high-fidelity rasterization using barycentric coordinates to determine pixel coverage. It calculates the total "covered area" by mapping triangles onto a discrete image grid, where each pixel’s status (occupied or empty) is tracked. This makes the tool particularly useful for engineering or architectural applications where understanding the footprint or visible profile of a complex object is necessary.
+
+The software is built for efficiency and batch processing, supporting features like automated output naming and modular math structures for 3D vector operations. Beyond numerical data—such as visible triangle counts and total projected area—FlatLand can generate visual output in the form of PPM (Portable Pixmap) images. These images represent the silhouette of the object, providing a clear, high-contrast visual representation of the mesh from the perspective of the calculated view frame.
 
 ## Build Instructions
 Tool doesn't rely on any third party libraries so it is extremely straight forward to build:
@@ -65,12 +69,13 @@ Primary take-away is that the projected area calculation converges as expected a
 Note, the lowest resolution image is 4x4 pixels while highest resolution image is 12070x15402 pixels.
 
 ## Benchmark 2: Sphere
-
+For this benchamrk we excercise the tool on Icosphere of varying resolutions as shown below. This is a great test since we know that the area of a unit sphere is $\pi$ from any view angle. 
 <div align="center" style="background-color: white; padding: 10px;">
   <img src="https://github.com/user-attachments/assets/de64a054-27bb-41b9-83e1-f89fdeecfbec" width="80%" />
   <p>Varying IcoSphere subdivision levels</p>
 </div>
 
+In this benchamrk we see that the cases exponentially converge towards the correct answer a mesh and pixel resolution increase.
 <table align="center" style="background-color: white; border-collapse: collapse; border: none;">
   <tr>
     <!-- Left Image -->
@@ -85,3 +90,5 @@ Note, the lowest resolution image is 4x4 pixels while highest resolution image i
     </td>
   </tr>
 </table>
+
+I have additionally done some sanity checks with various other geometries and all cases seem to work well. 
