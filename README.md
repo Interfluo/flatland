@@ -69,10 +69,11 @@ Primary take-away is that the projected area calculation converges as expected a
 Note, the lowest resolution image is 4x4 pixels while highest resolution image is 12070x15402 pixels.
 
 ## Benchmark 2: Sphere
-For this benchamrk we excercise the tool on Icosphere of varying resolutions as shown below. This is a great test since we know that the area of a unit sphere is $\pi$ from any view angle. 
+For this benchamrk we excercise the tool on [Icosphere](https://docs.pyvista.org/api/utilities/_autosummary/pyvista.icosphere
+) of varying resolutions as shown below. This is a great test since we know that the area of a unit sphere is $\pi$ from any view angle. 
 <div align="center" style="background-color: white; padding: 10px;">
   <img src="https://github.com/user-attachments/assets/de64a054-27bb-41b9-83e1-f89fdeecfbec" width="80%" />
-  <p>Varying IcoSphere subdivision levels</p>
+  <p>Varying Icosphere subdivision levels</p>
 </div>
 
 In this benchamrk we see that the cases exponentially converge towards the correct answer a mesh and pixel resolution increase.
