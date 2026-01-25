@@ -1,56 +1,107 @@
-# Flat-land
-FlatLand is a modular C++ utility designed for the geometric analysis and visualization of 3D models via orthographic projection and rasterization. The tool primarily focuses on computing the projected silhouette and visible surface area of 3D meshes (loaded via the OBJ file format) from arbitrary viewing angles. It utilizes a custom Z-buffer implementation to handle occlusions and depth testing, ensuring that only the forward-most surfaces contribute to the final calculations.
+# FlatLand
+FlatLand is a modular C++ utility designed for the geometric analysis and visualization of 3D models via orthographic projection and rasterization.
 
-Technically, the tool functions by transforming 3D triangles into a 2D coordinate system defined by a user-specified "view normal." Once projected, the software performs high-fidelity rasterization using barycentric coordinates to determine pixel coverage. It calculates the total "covered area" by mapping triangles onto a discrete image grid, where each pixel’s status (occupied or empty) is tracked. This makes the tool particularly useful for engineering or architectural applications where understanding the footprint or visible profile of a complex object is necessary.
+While primarily focused on computing the projected silhouette and visible surface area of 3D meshes (OBJ format), the latest version introduces scalar field mapping. This allows users to project arbitrary data (e.g., temperature, stress, pressure) defined on nodes or faces onto the 2D viewing plane, generating average value statistics and heatmap visualizations.
 
-The software is built for efficiency and batch processing, supporting features like automated output naming and modular math structures for 3D vector operations. Beyond numerical data—such as visible triangle counts and total projected area—FlatLand can generate visual output in the form of PPM (Portable Pixmap) images. These images represent the silhouette of the object, providing a clear, high-contrast visual representation of the mesh from the perspective of the calculated view frame.
+The tool features a custom Z-buffer implementation for depth testing and edge-function rasterization for high-fidelity coverage calculations. It is optimized for batch processing, supporting runtime precision switching (Float vs Double) and per-view resolution settings.
+
+## Key Features
+ - **Projected Area Analysis**: Accurate calculation of visible surface area from arbitrary viewing angles.
+ - **Scalar Data Mapping**: Load external data files (node-based or face-based) to compute visible average values and generate heatmap images.
+ - **Flexible Batch Mode**: Process thousands of views with a single load of the mesh geometry. Supports overriding resolution and data files per-view.
+ - **Runtime Precision**: Switch between float (speed) and double (accuracy) arithmetic via CLI flags.
+ - **Visual Output**: export .ppm heatmaps of the projected mesh.
+ - **JSON Integration**: Structured output for easy parsing in automated pipelines.
 
 ## Build Instructions
-Tool doesn't rely on any third party libraries so it is extremely straight forward to build:
+The tool relies on standard C++17 and CMake (3.14+). No third-party dependencies are required.
 ```shell
+# Clone the repository
 git clone https://github.com/Interfluo/flatland.git
-cd src/
+cd flatland
+
+# Build using the provided helper script
 ./run_build.sh
 ```
-
-This should create a build folder, to check that everything is working:
+Alternatively, you can build manually via CMake:
 ```shell
-cd build
-./flatland --help
-```
-which should output:
-```shell
-Usage: ./flatland <input.obj> [options]
-
-Computes visible projected area of an OBJ mesh from one or more view directions.
-
-Options:
-  -h, --help                Show this help
-  -v, --verbose             Verbose output
-  --view <x> <y> <z>        Single view normal (default: 1 0 0)
-  --views-file <file>       Text file with multiple view normals (x y z per line)
-  -p, --pixel-size <val>    Pixel size (default: 0.001)
-  -o, --output <prefix>     Output PPM prefix (batch: prefix_0000.ppm etc.)
-  --no-image                Disable PPM output
-  --json                    JSON output
-  --no-bfc                  Disable back-face culling
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake --build . --config Release
 ```
 
-## A few notes / tips
-1. For running large numbers of cases I recommend using the views-file option (see examples folder for an example of one), repeatedly calling the tool from the CLI adds a lot of overhead from reading in the mesh file.
-2. I recommend using the image output to do a sweep of pixel-size when initially setting up a case, make sure that you aren't under resolving the geometry. (Worst case scenario running quite high resolution should be pretty fast anyways)
-3. I generally recommend running without back-face culling, this is a bit faster and shouldn't make a difference form most situations.
+To verify the build:
+```shell
+./build/flatland --help
+```
 
-## Benchmark 1: Bunny 
-In this first benchmark we test the impact of varying resolution (pixel area) against computed projected area and note execution times. 
-We use the [stanford bunny geometry](https://docs.pyvista.org/api/examples/_autosummary/pyvista.examples.downloads.download_bunny.html#pyvista.examples.downloads.download_bunny) for fun.
+## Usage
+```shell
+./flatland <mesh.obj> [options]
+```
+### Core options
+| Flag | Arguments | Description |
+| :--- | :-------- | :---------- |
+|  -v  | x y z     | Add a single view direction. Can be repeated multiple times. | 
+|  -b  | file      | Load views from a batch file (see format below). | 
+|  -o  | prefix    | "Save heatmap images with this filename prefix (e.g., out_0000.ppm)." | 
+|  -j  | none      | Output results as structured JSON to stdout. | 
+|  -h  | none      | Show help message. |
+
+### Simulation Parameters
+| Flag | Arguments | Description |
+| :--- | :-------- | :---------- |
+| -r        | val | Set default pixel resolution (default: 0.001). Used if a batch entry doesn't specify one.| 
+| -d        | file |  "Path to a default scalar data file (text file, one value per line)."| 
+| -p        | mode |  "Set math precision: float (default, faster) or double (higher accuracy)."| 
+| --no-cull |none |  Disable backface culling (renders all matching faces).| 
+
+### Batch File Format
+The batch file (-b) allows for defining mixed-resolution or mixed-data jobs. Each line represents a view.
+```text
+<nx> <ny> <nz> [resolution] [data_file_path]
+```
+ - resolution and data_file_path are optional.
+ - If omitted, the global defaults (set via -r and -d) are used.
+
+**Example** views.txt:
+```text
+# Standard view using global defaults
+1.0 0.0 0.0
+
+# High-resolution view (0.005 pixel size)
+0.0 1.0 0.0 0.005
+
+# View with specific scalar data file overlay
+0.0 0.0 1.0 0.002 ./pressure_load_case_2.txt
+```
+
+### Examples
+**1. Basic Area Calculation**: Calculate the projected area of bunny.obj from the X-axis using default settings.
+```shell
+./flatland bunny.obj -v 1 0 0
+```
+**2. Heatmap Generation with Double Precision**: Map values from temps.txt onto the mesh, render a heatmap to heat_0000.ppm, using high-precision math.
+```shell
+./flatland engine.obj -v 0 1 1 -d temps.txt -p double -o heat
+```
+**3. JSON Pipeline**: Run a batch of views defined in views.txt, outputting strict JSON for a Python script to ingest.
+```shell
+./flatland part.obj -b views.txt -j > results.json
+```
+
+## Benchmarks
+
+### Benchmark 1: Bunny 
+In this benchmark, we test the impact of varying resolution (pixel area) against computed projected area and note execution times. We use the [Stanford Bunny](https://docs.pyvista.org/api/examples/_autosummary/pyvista.examples.downloads.download_bunny.html#pyvista.examples.downloads.download_bunny)  geometry.
 
 <div align="center" style="background-color: white; padding: 10px;">
   <img src="https://github.com/user-attachments/assets/eaefb062-e3fc-403a-8bed-a19a79b1a1dd" width="80%" />
   <p>Pixel size vs image quality</p>
 </div>
 
-Primary take-away is that the projected area calculation converges as expected and that execution times are quite fast even for the highest resolution case. 
+The projected area calculation converges as expected, and execution times remain fast even for the highest resolution cases.
+
 <table align="center" style="background-color: white; border-collapse: collapse; border: none;">
   <tr>
     <!-- Left Image -->
@@ -66,17 +117,19 @@ Primary take-away is that the projected area calculation converges as expected a
   </tr>
 </table>
 
-Note, the lowest resolution image is 4x4 pixels while highest resolution image is 12070x15402 pixels.
+*Note, that the lowest resolution image is 4x4 pixels while highest resolution image is 12070x15402 pixels.*
 
-## Benchmark 2: Sphere
-For this benchamrk we excercise the tool on [Icosphere](https://docs.pyvista.org/api/utilities/_autosummary/pyvista.icosphere
-) of varying resolutions as shown below. This is a great test since we know that the area of a unit sphere is $\pi$ from any view angle. 
+### Benchmark 2: Sphere
+This benchmark exercises the tool on an [Icosphere](https://docs.pyvista.org/api/utilities/_autosummary/pyvista.icosphere
+) of varying subdivision levels. This is a vital validation case since the area of a unit sphere is known to be $\pi$ from any view angle.
+
 <div align="center" style="background-color: white; padding: 10px;">
   <img src="https://github.com/user-attachments/assets/de64a054-27bb-41b9-83e1-f89fdeecfbec" width="80%" />
   <p>Varying Icosphere subdivision levels</p>
 </div>
 
-In this benchamrk we see that the cases exponentially converge towards the correct answer a mesh and pixel resolution increase.
+The results demonstrate exponential convergence towards the correct analytical answer as mesh and pixel resolution increase.
+
 <table align="center" style="background-color: white; border-collapse: collapse; border: none;">
   <tr>
     <!-- Left Image -->
@@ -92,4 +145,12 @@ In this benchamrk we see that the cases exponentially converge towards the corre
   </tr>
 </table>
 
-I have additionally done some sanity checks with various other geometries and all cases seem to work well. 
+
+## Notes / Tips
+
+1. **Batch Processing**: For large datasets, always use the batch file (-b) option. Repeatedly calling the tool from the CLI incurs overhead from re-loading and parsing the OBJ file every time.
+
+2. **Resolution**: Use the image output (-o) to perform a sweep of pixel sizes when setting up a new case. Ensure you are not under-resolving thin geometry features.
+
+3. **Culling**: Running without back-face culling (--no-cull) is supported but rarely necessary unless you are dealing with non-manifold or open surface meshes where "inside" faces contribute to the silhouette.
+
