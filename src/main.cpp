@@ -262,20 +262,14 @@ ViewResult<T> process_view(const Vec3<T>& view_dir, const Mesh<T>& mesh, T pix_s
         const Vec3<T>& v2 = mesh.vertices[f.v2_idx];
 
         Vec3<T> tri_n = cross(v1-v0, v2-v0);
-        if (cull && dot(tri_n, n) >= 0) continue;
-
+        // if (cull && dot(tri_n, n) >= 0) continue;
+        if (cull && dot(tri_n, n) <= 0) continue;
+        
         Vec2<T> p0 = {dot(v0,u), dot(v0,v)};
         Vec2<T> p1 = {dot(v1,u), dot(v1,v)};
         Vec2<T> p2 = {dot(v2,u), dot(v2,v)};
 
-        T area2 = edge_eval(p0, p1, p2);
-        if (std::abs(area2) < 1e-12) continue;
-
-        b_min_x = std::min({b_min_x, p0.x, p1.x, p2.x});
-        b_max_x = std::max({b_max_x, p0.x, p1.x, p2.x});
-        b_min_y = std::min({b_min_y, p0.y, p1.y, p2.y});
-        b_max_y = std::max({b_max_y, p0.y, p1.y, p2.y});
-
+        // 1. COMPUTE VALUES FIRST to avoid "undeclared identifier"
         T val0=0, val1=0, val2=0;
         if (mesh.val_mode == MODE_NODE) {
             val0=mesh.values[f.v0_idx]; val1=mesh.values[f.v1_idx]; val2=mesh.values[f.v2_idx];
@@ -283,7 +277,33 @@ ViewResult<T> process_view(const Vec3<T>& view_dir, const Mesh<T>& mesh, T pix_s
             val0=val1=val2=mesh.values[i];
         }
 
-        tris.push_back({p0, p1, p2, dot(v0,n), dot(v1,n), dot(v2,n), val0, val1, val2, 1.0f/area2});
+        T area2 = edge_eval(p0, p1, p2);
+        if (std::abs(area2) < 1e-12) continue;
+        
+        // area2 is twice the signed area in screen space; positive = CCW
+        b_min_x = std::min({b_min_x, p0.x, p1.x, p2.x});
+        b_max_x = std::max({b_max_x, p0.x, p1.x, p2.x});
+        b_min_y = std::min({b_min_y, p0.y, p1.y, p2.y});
+        b_max_y = std::max({b_max_y, p0.y, p1.y, p2.y});
+
+        // 2. WINDING FIX: Check for Negative Area (Clockwise)
+        // If CW, we swap vertices 1 and 2 to make it CCW.
+        if (area2 < 0) {
+            tris.push_back({
+                p0, p2, p1,                          // Swap 2D Vertices
+                
+                dot(v0,n), dot(v2,n), dot(v1,n),     // Swap Depths (CRITICAL for Z-buffer)
+                val0, val2, val1,                    // Swap Values (CRITICAL for Shading)
+                (T)(1.0/(-area2))                    // Use Positive Area
+            });
+        } else {
+            tris.push_back({
+                p0, p1, p2,
+                dot(v0,n), dot(v1,n), dot(v2,n),
+                val0, val1, val2,
+                (T)(1.0/area2)
+            });
+        }
     }
 
     if (!tris.empty()) {
