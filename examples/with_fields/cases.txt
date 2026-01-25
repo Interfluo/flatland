@@ -1,0 +1,9 @@
+# nx ny nz r file
+1 0 0 0.0001 data/face_field_0.txt
+1 0 0 0.0001 data/node_field_0.txt
+0 1 0 0.0001 data/node_field_0.txt
+0 0 1 0.0001 data/node_field_0.txt
+0 1 0 0.0001 data/node_field_5.txt
+0 1 0 0.0001 data/node_field_20.txt
+0 1 0 0.0010 data/node_field_20.txt
+0 1 0 0.0100 data/node_field_20.txt
