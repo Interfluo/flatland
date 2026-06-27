@@ -1,0 +1,25 @@
+# a <azimuth> <elevation> <resolution> field.txt@<timestep>
+a 0.0000 20 0.02 field.txt@0
+a 15.0000 20 0.02 field.txt@1
+a 30.0000 20 0.02 field.txt@2
+a 45.0000 20 0.02 field.txt@3
+a 60.0000 20 0.02 field.txt@4
+a 75.0000 20 0.02 field.txt@5
+a 90.0000 20 0.02 field.txt@6
+a 105.0000 20 0.02 field.txt@7
+a 120.0000 20 0.02 field.txt@8
+a 135.0000 20 0.02 field.txt@9
+a 150.0000 20 0.02 field.txt@10
+a 165.0000 20 0.02 field.txt@11
+a 180.0000 20 0.02 field.txt@12
+a 195.0000 20 0.02 field.txt@13
+a 210.0000 20 0.02 field.txt@14
+a 225.0000 20 0.02 field.txt@15
+a 240.0000 20 0.02 field.txt@16
+a 255.0000 20 0.02 field.txt@17
+a 270.0000 20 0.02 field.txt@18
+a 285.0000 20 0.02 field.txt@19
+a 300.0000 20 0.02 field.txt@20
+a 315.0000 20 0.02 field.txt@21
+a 330.0000 20 0.02 field.txt@22
+a 345.0000 20 0.02 field.txt@23
