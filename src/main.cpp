@@ -643,13 +643,24 @@ int main(int argc, char* argv[]) {
                     if (nx==0 && ny==0 && nz==0)
                         throw std::runtime_error("batch line " + std::to_string(lineno) + ": zero view vector");
                     BatchEntry be = {nx, ny, nz, -1.0, ""};
-                    double r_temp;
-                    if (ss >> r_temp) {
-                        if (r_temp <= 0) throw std::runtime_error("batch line " + std::to_string(lineno) + ": resolution must be positive");
-                        be.resolution = r_temp;
-                        std::string d_temp;
-                        if (ss >> d_temp)
-                            be.data_file = (d_temp[0] == '/') ? d_temp : batch_dir + d_temp;
+                    auto resolve = [&](const std::string& p) {
+                        return (!p.empty() && p[0] == '/') ? p : batch_dir + p;
+                    };
+                    // The optional trailing tokens are [resolution] and/or [data_file],
+                    // in that order. We sniff each token: a pure number is a resolution,
+                    // anything else is a data-file path. This lets a view attach data
+                    // without having to restate the default resolution.
+                    std::string tok;
+                    if (ss >> tok) {
+                        char* endp; double rv = std::strtod(tok.c_str(), &endp);
+                        if (*endp == '\0') { // pure number -> resolution
+                            if (rv <= 0) throw std::runtime_error("batch line " + std::to_string(lineno) + ": resolution must be positive");
+                            be.resolution = rv;
+                            std::string d_temp;
+                            if (ss >> d_temp) be.data_file = resolve(d_temp);
+                        } else {             // non-numeric -> data file, default resolution
+                            be.data_file = resolve(tok);
+                        }
                     }
                     batch.push_back(be);
                 } else if (!line.empty() && line.find_first_not_of(" \t\r\n") != std::string::npos) {

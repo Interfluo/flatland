@@ -83,6 +83,11 @@ N=$(grep -c '"idx"' "$TMP/b.json")
 [ "$N" = "2" ] && ok "batch produced 2 results" || bad "batch result count (got $N)"
 near "$(jget "$TMP/b.json" average)" 2.0 0.001 "batch relative data path resolved"
 
+# 10b. Batch data file WITHOUT an explicit resolution must still apply (token sniff)
+printf "1 0 0 f.txt\n" > "$TMP/case/nores.txt"
+"$BIN" "$CUBE" -b "$TMP/case/nores.txt" -j 2>/dev/null > "$TMP/nr.json"
+near "$(jget "$TMP/nr.json" average)" 2.0 0.001 "batch data file without resolution applied"
+
 # 11. float and double precision both run; invalid precision rejected
 "$BIN" "$CUBE" -v 1 0 0 -p double -j >/dev/null 2>&1 && ok "double precision runs" || bad "double precision"
 "$BIN" "$CUBE" -v 1 0 0 -p quad  >/dev/null 2>&1; expect_fail $? "invalid precision rejected"
