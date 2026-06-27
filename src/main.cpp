@@ -33,6 +33,7 @@
 #include <atomic>
 #include <mutex>
 #include <cstdlib>
+#include <clocale>
 #include <stdexcept>
 
 /* ----------------------
@@ -208,6 +209,16 @@ Mesh<T> load_obj(const std::string& filename) {
     }
     if (mesh.vertices.empty()) throw std::runtime_error("mesh '" + filename + "' contains no vertices");
     if (mesh.faces.empty())    throw std::runtime_error("mesh '" + filename + "' contains no faces");
+
+    // Guard against malformed files: every face index must reference a real vertex,
+    // otherwise process_view would read out of bounds.
+    const int nv = (int)mesh.vertices.size();
+    for (const auto& f : mesh.faces) {
+        if (f.v0_idx < 0 || f.v0_idx >= nv ||
+            f.v1_idx < 0 || f.v1_idx >= nv ||
+            f.v2_idx < 0 || f.v2_idx >= nv)
+            throw std::runtime_error("mesh '" + filename + "' references an out-of-range vertex index");
+    }
     return mesh;
 }
 
@@ -567,6 +578,10 @@ static double parse_double(const std::string& s, const std::string& ctx) {
 }
 
 int main(int argc, char* argv[]) {
+    // Force the C locale so numeric parsing (strtod/sscanf) always uses '.' as the
+    // decimal separator, regardless of the user's environment locale.
+    std::setlocale(LC_ALL, "C");
+
     if (argc < 2) { print_help(argv[0]); return 1; }
 
     std::string obj_file, data_file, batch_file, out_pre, prec="float";

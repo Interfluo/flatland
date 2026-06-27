@@ -69,6 +69,9 @@ P=$("$BIN" "$CUBE" --view 1 0 0 --res 0.1 -j 2>/dev/null | grep -m1 '"pixels"' |
 # 9. Field size mismatch -> error
 echo "1.0" > "$TMP/bad.txt"
 "$BIN" "$CUBE" -v 1 0 0 -d "$TMP/bad.txt" >/dev/null 2>&1; expect_fail $? "field size mismatch rejected"
+# 9b. Out-of-bounds vertex index in OBJ -> error (not a crash)
+printf "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 99\n" > "$TMP/oob.obj"
+"$BIN" "$TMP/oob.obj" -v 1 0 0 >/dev/null 2>&1; expect_fail $? "out-of-bounds vertex index rejected"
 
 echo "== Batch / time-series =="
 # 10. Batch with relative data path resolves against the batch file's directory
