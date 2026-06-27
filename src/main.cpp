@@ -2,11 +2,20 @@
 //  main.cpp
 //  FlatLand
 //
-//  Features:
-//  - Runtime precision switching (Float vs Double)
-//  - Flexible Batch Mode (Per-view resolution & data files)
-//  - Edge Function Rasterization
-//  - JSON Metadata
+//  Orthographic projection + rasterization for geometric analysis of 3D meshes.
+//
+//  Core capabilities:
+//   - Projected (silhouette / visible) surface area from arbitrary view directions
+//   - Generic per-view field statistics over the visible projection:
+//       average, min, max, and the AREA INTEGRAL  ∫ f dA = Σ value · pixel_area.
+//     The integral is the building block for quantities such as radiant
+//     intensity (supply a radiance field) — FlatLand stays domain-agnostic.
+//   - Runtime precision switching (float / double)
+//   - Batch mode with per-view resolution and data files
+//   - Parallel batch processing (standard library threads only)
+//   - PPM heatmap export and structured JSON output
+//
+//  No third-party dependencies. C++17.
 //
 
 #include <iostream>
@@ -19,8 +28,12 @@
 #include <iomanip>
 #include <algorithm>
 #include <limits>
-#include <cstring>
 #include <memory>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <cstdlib>
+#include <stdexcept>
 
 /* ----------------------
    Math & Structs (Templated)
@@ -37,26 +50,34 @@ struct TriProjected {
 };
 
 struct Triangle3D {
-    int v0_idx, v1_idx, v2_idx; // Indices into vertex array
-    // We store indices to allow re-fetching vertices if precision changes (though here we load once)
+    int v0_idx, v1_idx, v2_idx; // Indices into the vertex array
 };
 
 enum ValueMode { MODE_NONE, MODE_NODE, MODE_FACE };
 
+// Read-only geometry, loaded once and shared across all views/threads.
 template <typename T>
 struct Mesh {
     std::vector<Vec3<T>> vertices;
     std::vector<Triangle3D> faces;
+};
+
+// A scalar field defined on the mesh. Kept separate from Mesh so different
+// views can use different fields without mutating shared state (thread-safe).
+template <typename T>
+struct Field {
     std::vector<T> values;
-    ValueMode val_mode = MODE_NONE;
+    ValueMode mode = MODE_NONE;
 };
 
 template <typename T>
 struct ViewResult {
+    bool has_field = false;
     T area = 0;
     T average_value = 0;
-    T min_val = std::numeric_limits<T>::max();
-    T max_val = -std::numeric_limits<T>::max();
+    T integral = 0;     // Σ value · pixel_area  (the area integral of the field)
+    T min_val = 0;
+    T max_val = 0;
     double time_seconds = 0.0;
     long covered_pixels = 0;
     int image_width = 0;
@@ -79,7 +100,7 @@ template <typename T> inline Vec3<T> operator-(const Vec3<T>& a, const Vec3<T>& 
 template <typename T> inline Vec3<T> normalize(const Vec3<T>& v) { T n = std::sqrt(dot(v,v)); return n>0 ? Vec3<T>{v.x/n, v.y/n, v.z/n} : Vec3<T>{0,0,0}; }
 
 /* ----------------------
-   Renderer
+   Renderer (one per worker thread)
    ---------------------- */
 template <typename T>
 class Renderer {
@@ -91,12 +112,12 @@ public:
 
     void resize(int w, int h, bool use_vals) {
         size_t needed = (size_t)w * h;
-        if (needed == 0) return;
+        if (needed == 0) { Nx = Ny = 0; return; }
         Nx = w; Ny = h;
         if (zbuffer.size() < needed) zbuffer.resize(needed);
         if (mask.size() < needed) mask.resize(needed);
         if (use_vals && val_buffer.size() < needed) val_buffer.resize(needed);
-        
+
         std::fill(zbuffer.begin(), zbuffer.begin() + needed, std::numeric_limits<T>::max());
         std::fill(mask.begin(), mask.begin() + needed, 0);
         if (use_vals) std::fill(val_buffer.begin(), val_buffer.begin() + needed, 0);
@@ -112,7 +133,7 @@ inline T edge_eval(const Vec2<T>& a, const Vec2<T>& b, const Vec2<T>& p) {
 }
 
 template <typename T>
-void rasterize(const TriProjected<T>& tri, Renderer<T>& r, T xmin, T ymin, T pix_sz) {
+void rasterize(const TriProjected<T>& tri, Renderer<T>& r, T xmin, T ymin, T pix_sz, bool use_vals) {
     T min_x = std::min({tri.v0.x, tri.v1.x, tri.v2.x});
     T max_x = std::max({tri.v0.x, tri.v1.x, tri.v2.x});
     T min_y = std::min({tri.v0.y, tri.v1.y, tri.v2.y});
@@ -123,14 +144,14 @@ void rasterize(const TriProjected<T>& tri, Renderer<T>& r, T xmin, T ymin, T pix
     int iy_min = std::max(0, static_cast<int>((min_y - ymin)/pix_sz));
     int iy_max = std::min(r.Ny - 1, static_cast<int>((max_y - ymin)/pix_sz));
 
-    Vec2<T> p_start = { xmin + (ix_min + 0.5f)*pix_sz, ymin + (iy_min + 0.5f)*pix_sz };
-    
-    // Edge Functions Setup
+    Vec2<T> p_start = { xmin + (ix_min + (T)0.5)*pix_sz, ymin + (iy_min + (T)0.5)*pix_sz };
+
+    // Edge function values at the first sampled pixel center
     T w0_row = edge_eval(tri.v1, tri.v2, p_start);
     T w1_row = edge_eval(tri.v2, tri.v0, p_start);
     T w2_row = edge_eval(tri.v0, tri.v1, p_start);
-    
-    // Increments
+
+    // Per-pixel increments
     T A0 = (tri.v2.y - tri.v1.y)*pix_sz, B0 = (tri.v1.x - tri.v2.x)*pix_sz;
     T A1 = (tri.v0.y - tri.v2.y)*pix_sz, B1 = (tri.v2.x - tri.v0.x)*pix_sz;
     T A2 = (tri.v1.y - tri.v0.y)*pix_sz, B2 = (tri.v0.x - tri.v1.x)*pix_sz;
@@ -144,7 +165,7 @@ void rasterize(const TriProjected<T>& tri, Renderer<T>& r, T xmin, T ymin, T pix
                 if (z < r.zbuffer[idx]) {
                     r.zbuffer[idx] = z;
                     r.mask[idx] = 1;
-                    if (!r.val_buffer.empty())
+                    if (use_vals)
                         r.val_buffer[idx] = (w0*tri.val0 + w1*tri.val1 + w2*tri.val2)*tri.inv_area;
                 }
             }
@@ -157,13 +178,13 @@ void rasterize(const TriProjected<T>& tri, Renderer<T>& r, T xmin, T ymin, T pix
 /* ----------------------
    IO & Loaders
    ---------------------- */
-// Templated OBJ loader to support Float/Double
+// Templated OBJ loader to support float/double geometry.
 template <typename T>
 Mesh<T> load_obj(const std::string& filename) {
     Mesh<T> mesh;
     std::ifstream file(filename);
-    if (!file.is_open()) throw std::runtime_error("Cannot open " + filename);
-    
+    if (!file.is_open()) throw std::runtime_error("cannot open mesh file '" + filename + "'");
+
     std::string line;
     while (std::getline(file, line)) {
         if (line.empty() || line[0] == '#') continue;
@@ -185,53 +206,69 @@ Mesh<T> load_obj(const std::string& filename) {
                 mesh.faces.push_back({idxs[0], idxs[k-1], idxs[k]});
         }
     }
+    if (mesh.vertices.empty()) throw std::runtime_error("mesh '" + filename + "' contains no vertices");
+    if (mesh.faces.empty())    throw std::runtime_error("mesh '" + filename + "' contains no faces");
     return mesh;
 }
 
+// Fast field loader: slurp the whole file and parse with strtod (far faster than
+// iostream extraction for the time-series case of thousands of field files).
+// Reuses `field.values` storage so per-timestep reloads don't churn allocations.
 template <typename T>
-void load_values(const std::string& filename, Mesh<T>& mesh) {
-    if (filename.empty()) return;
-    mesh.values.clear();
-    std::ifstream file(filename);
-    if (!file.is_open()) throw std::runtime_error("Cannot open data file " + filename);
-    double v;
-    while (file >> v) mesh.values.push_back((T)v);
-    
-    if (mesh.values.size() == mesh.vertices.size()) mesh.val_mode = MODE_NODE;
-    else if (mesh.values.size() == mesh.faces.size()) mesh.val_mode = MODE_FACE;
-    else throw std::runtime_error("Data size mismatch: " + std::to_string(mesh.values.size()));
+void load_field_into(const std::string& filename, const Mesh<T>& mesh, Field<T>& field) {
+    std::ifstream file(filename, std::ios::binary);
+    if (!file.is_open()) throw std::runtime_error("cannot open data file '" + filename + "'");
+    std::string buf((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+
+    field.values.clear();
+    const char* p = buf.c_str();
+    char* end;
+    double d = std::strtod(p, &end);
+    while (end != p) {                 // strtod skips leading whitespace itself
+        field.values.push_back((T)d);
+        p = end;
+        d = std::strtod(p, &end);
+    }
+
+    if (field.values.size() == mesh.vertices.size())   field.mode = MODE_NODE;
+    else if (field.values.size() == mesh.faces.size()) field.mode = MODE_FACE;
+    else throw std::runtime_error("data file '" + filename + "' has " +
+            std::to_string(field.values.size()) + " values, but mesh has " +
+            std::to_string(mesh.vertices.size()) + " vertices / " +
+            std::to_string(mesh.faces.size()) + " faces");
 }
 
 /* ----------------------
    Image Output
    ---------------------- */
 template <typename T>
-void save_ppm(const Renderer<T>& r, const std::string& fname, T min_v, T max_v) {
+void save_ppm(const Renderer<T>& r, const std::string& fname, T min_v, T max_v, bool use_vals) {
     std::ofstream f(fname, std::ios::binary);
-    if (!f.is_open()) return;
+    if (!f.is_open()) throw std::runtime_error("cannot write image '" + fname + "'");
     f << "P6\n" << r.Nx << " " << r.Ny << "\n255\n";
     double range = (double)(max_v - min_v);
     if (std::abs(range) < 1e-9) range = 1.0;
     const uint8_t bg[3] = {30,30,35};
-    
-    // Simple heatmap colors
+
+    // Simple 5-stop heatmap (blue -> cyan -> yellow -> orange -> red)
     const double stops[5][3] = {{0,0,1}, {0,1,1}, {1,1,0}, {1,.5,0}, {1,0,0}};
-    
+
     for (int iy=r.Ny-1; iy>=0; --iy) {
         for (int ix=0; ix<r.Nx; ++ix) {
             size_t i = (size_t)iy * r.Nx + ix;
-            if (!r.mask[i]) f.write((char*)bg, 3);
-            else {
-                double t = (r.val_buffer.empty()) ? 1.0 : ((double)r.val_buffer[i] - min_v)/range;
+            if (!r.mask[i]) { f.write((const char*)bg, 3); continue; }
+            uint8_t rgb[3];
+            if (!use_vals) {
+                rgb[0]=rgb[1]=rgb[2]=255;            // silhouette: solid white
+            } else {
+                double t = ((double)r.val_buffer[i] - min_v)/range;
                 t = std::max(0.0, std::min(1.0, t)) * 4.0;
                 int idx = (int)t;
                 if (idx >= 4) idx = 3;
                 double fr = t - idx;
-                uint8_t rgb[3];
                 for(int c=0;c<3;++c) rgb[c] = (uint8_t)(((1.0-fr)*stops[idx][c] + fr*stops[idx+1][c])*255);
-                if (r.val_buffer.empty()) { rgb[0]=rgb[1]=rgb[2]=255; }
-                f.write((char*)rgb, 3);
             }
+            f.write((const char*)rgb, 3);
         }
     }
 }
@@ -240,17 +277,20 @@ void save_ppm(const Renderer<T>& r, const std::string& fname, T min_v, T max_v) 
    Processing Pipeline
    ---------------------- */
 template <typename T>
-ViewResult<T> process_view(const Vec3<T>& view_dir, const Mesh<T>& mesh, T pix_sz, bool cull, Renderer<T>& renderer) {
+ViewResult<T> process_view(const Vec3<T>& view_dir, const Mesh<T>& mesh, const Field<T>* field,
+                           T pix_sz, bool cull, Renderer<T>& renderer) {
     auto t0 = std::chrono::high_resolution_clock::now();
     ViewResult<T> res;
-    
-    // Basis
+    const bool use_vals = (field && field->mode != MODE_NONE);
+    res.has_field = use_vals;
+
+    // Orthonormal view basis (n = view normal, u/v = screen axes)
     Vec3<T> n = normalize(view_dir);
     Vec3<T> h = (std::abs(n.x) < 0.9) ? Vec3<T>{1,0,0} : Vec3<T>{0,1,0};
     Vec3<T> u = normalize(cross(h, n));
     Vec3<T> v = cross(n, u);
 
-    // Project
+    // Project triangles to the view plane
     std::vector<TriProjected<T>> tris;
     tris.reserve(mesh.faces.size());
     T b_min_x=1e20, b_max_x=-1e20, b_min_y=1e20, b_max_y=-1e20;
@@ -262,47 +302,40 @@ ViewResult<T> process_view(const Vec3<T>& view_dir, const Mesh<T>& mesh, T pix_s
         const Vec3<T>& v2 = mesh.vertices[f.v2_idx];
 
         Vec3<T> tri_n = cross(v1-v0, v2-v0);
-        // if (cull && dot(tri_n, n) >= 0) continue;
-        if (cull && dot(tri_n, n) <= 0) continue;
-        
+        if (cull && dot(tri_n, n) <= 0) continue;   // keep faces pointing toward the viewer
+
         Vec2<T> p0 = {dot(v0,u), dot(v0,v)};
         Vec2<T> p1 = {dot(v1,u), dot(v1,v)};
         Vec2<T> p2 = {dot(v2,u), dot(v2,v)};
 
-        // 1. COMPUTE VALUES FIRST to avoid "undeclared identifier"
         T val0=0, val1=0, val2=0;
-        if (mesh.val_mode == MODE_NODE) {
-            val0=mesh.values[f.v0_idx]; val1=mesh.values[f.v1_idx]; val2=mesh.values[f.v2_idx];
-        } else if (mesh.val_mode == MODE_FACE) {
-            val0=val1=val2=mesh.values[i];
+        if (use_vals) {
+            if (field->mode == MODE_NODE) {
+                val0=field->values[f.v0_idx]; val1=field->values[f.v1_idx]; val2=field->values[f.v2_idx];
+            } else { // MODE_FACE
+                val0=val1=val2=field->values[i];
+            }
         }
 
-        T area2 = edge_eval(p0, p1, p2);
+        T area2 = edge_eval(p0, p1, p2); // twice signed screen-space area; >0 = CCW
         if (std::abs(area2) < 1e-12) continue;
-        
-        // area2 is twice the signed area in screen space; positive = CCW
+
         b_min_x = std::min({b_min_x, p0.x, p1.x, p2.x});
         b_max_x = std::max({b_max_x, p0.x, p1.x, p2.x});
         b_min_y = std::min({b_min_y, p0.y, p1.y, p2.y});
         b_max_y = std::max({b_max_y, p0.y, p1.y, p2.y});
 
-        // 2. WINDING FIX: Check for Negative Area (Clockwise)
-        // If CW, we swap vertices 1 and 2 to make it CCW.
+        // Normalize winding to CCW so edge functions are positive inside.
         if (area2 < 0) {
-            tris.push_back({
-                p0, p2, p1,                          // Swap 2D Vertices
-                
-                dot(v0,n), dot(v2,n), dot(v1,n),     // Swap Depths (CRITICAL for Z-buffer)
-                val0, val2, val1,                    // Swap Values (CRITICAL for Shading)
-                (T)(1.0/(-area2))                    // Use Positive Area
-            });
+            tris.push_back({ p0, p2, p1,
+                             dot(v0,n), dot(v2,n), dot(v1,n),
+                             val0, val2, val1,
+                             (T)(1.0/(-area2)) });
         } else {
-            tris.push_back({
-                p0, p1, p2,
-                dot(v0,n), dot(v1,n), dot(v2,n),
-                val0, val1, val2,
-                (T)(1.0/area2)
-            });
+            tris.push_back({ p0, p1, p2,
+                             dot(v0,n), dot(v1,n), dot(v2,n),
+                             val0, val1, val2,
+                             (T)(1.0/area2) });
         }
     }
 
@@ -311,95 +344,174 @@ ViewResult<T> process_view(const Vec3<T>& view_dir, const Mesh<T>& mesh, T pix_s
         b_min_y -= pix_sz; b_max_y += pix_sz;
         int w = (int)std::ceil((b_max_x - b_min_x)/pix_sz);
         int h = (int)std::ceil((b_max_y - b_min_y)/pix_sz);
-        
-        renderer.resize(w, h, mesh.val_mode != MODE_NONE);
+
+        renderer.resize(w, h, use_vals);
         res.image_width=w; res.image_height=h;
 
-        for (const auto& t : tris) rasterize(t, renderer, b_min_x, b_min_y, pix_sz);
+        for (const auto& t : tris) rasterize(t, renderer, b_min_x, b_min_y, pix_sz, use_vals);
 
-        // Stats
+        // Aggregate statistics over visible pixels
         size_t npix = (size_t)w * h;
         double sum = 0;
+        T mn = std::numeric_limits<T>::max();
+        T mx = -std::numeric_limits<T>::max();
         for (size_t k=0; k<npix; ++k) {
-            if (renderer.mask[k]) {
-                res.covered_pixels++;
-                if (mesh.val_mode != MODE_NONE) {
-                    T val = renderer.val_buffer[k];
-                    sum += val;
-                    if (val < res.min_val) res.min_val = val;
-                    if (val > res.max_val) res.max_val = val;
-                }
+            if (!renderer.mask[k]) continue;
+            res.covered_pixels++;
+            if (use_vals) {
+                T val = renderer.val_buffer[k];
+                sum += val;
+                if (val < mn) mn = val;
+                if (val > mx) mx = val;
             }
         }
-        res.area = res.covered_pixels * pix_sz * pix_sz;
-        if (res.covered_pixels) res.average_value = (T)(sum / res.covered_pixels);
-        else { res.min_val = res.max_val = 0; }
+        T pix_area = pix_sz * pix_sz;
+        res.area = res.covered_pixels * pix_area;
+        if (use_vals && res.covered_pixels) {
+            res.average_value = (T)(sum / res.covered_pixels);
+            res.integral = (T)(sum * pix_area);  // ∫ f dA over the visible projection
+            res.min_val = mn;
+            res.max_val = mx;
+        }
     }
-    
+
     res.time_seconds = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - t0).count();
     return res;
 }
 
 /* ----------------------
-   Application Runners
+   Output Helpers
    ---------------------- */
-// Escaping for JSON
 std::string esc(const std::string& s) {
     std::string out;
     for(char c:s) (c=='\\'||c=='"') ? out+="\\" + std::string(1,c) : out+=c;
     return out;
 }
 
+// Emit a JSON-safe number: non-finite values become null so pipelines don't choke.
+template <typename T>
+std::string jnum(T v) {
+    if (!std::isfinite((double)v)) return "null";
+    std::ostringstream o; o << std::setprecision(10) << (double)v; return o.str();
+}
+
+/* ----------------------
+   Application Runner
+   ---------------------- */
 template <typename T>
 void run_app(const std::string& obj, const std::string& default_data, const std::string& out_pre,
-             const std::vector<BatchEntry>& batch, double default_res, bool cull, bool json) {
-    
+             const std::vector<BatchEntry>& batch, double default_res, bool cull, bool json,
+             unsigned threads) {
+
     Mesh<T> mesh = load_obj<T>(obj);
-    if (!default_data.empty()) load_values(default_data, mesh); // Preload default data
 
-    Renderer<T> renderer;
+    // A fixed field (-d) is loaded ONCE and shared read-only across all timesteps/threads.
+    std::shared_ptr<Field<T>> default_field;
+    if (!default_data.empty()) {
+        default_field = std::make_shared<Field<T>>();
+        load_field_into(default_data, mesh, *default_field);
+    }
 
+    std::vector<T> view_res(batch.size());
+    for (size_t k=0; k<batch.size(); ++k)
+        view_res[k] = (batch[k].resolution > 0) ? (T)batch[k].resolution : (T)default_res;
+
+    std::vector<ViewResult<T>> results(batch.size());
+    std::atomic<size_t> next{0};
+    std::mutex err_mtx;
+    std::string err_msg;
+
+    // Worker: pull timestep indices off a shared counter. Each owns a renderer and a
+    // reusable field buffer, so per-timestep field files load on demand -> peak memory
+    // is O(threads), not O(timesteps). The shared fixed field is never reloaded.
+    auto worker = [&]() {
+        Renderer<T> renderer;
+        Field<T> local;            // scratch for per-view data files
+        std::string local_path;    // last file loaded into `local`
+        size_t k;
+        while ((k = next.fetch_add(1)) < batch.size()) {
+            try {
+                const auto& b = batch[k];
+                const std::string& path = b.data_file.empty() ? default_data : b.data_file;
+
+                const Field<T>* fp = nullptr;
+                if (path.empty()) {
+                    fp = nullptr;
+                } else if (path == default_data) {
+                    fp = default_field.get();                 // shared, already loaded
+                } else {
+                    if (path != local_path) { load_field_into(path, mesh, local); local_path = path; }
+                    fp = &local;
+                }
+
+                ViewResult<T> r = process_view<T>({(T)b.nx, (T)b.ny, (T)b.nz}, mesh, fp,
+                                                  view_res[k], cull, renderer);
+                if (!out_pre.empty()) {
+                    std::ostringstream oss; oss << out_pre << "_" << std::setw(4) << std::setfill('0') << k << ".ppm";
+                    r.output_image = oss.str();
+                    save_ppm(renderer, r.output_image, r.min_val, r.max_val, r.has_field);
+                }
+                results[k] = std::move(r);
+            } catch (const std::exception& e) {
+                std::lock_guard<std::mutex> lk(err_mtx);
+                if (err_msg.empty()) err_msg = "timestep " + std::to_string(k) + ": " + e.what();
+                next.store(batch.size());   // signal other workers to stop
+                return;
+            }
+        }
+    };
+
+    unsigned n_workers = std::max(1u, std::min<unsigned>(threads, (unsigned)batch.size()));
+    if (n_workers <= 1) {
+        worker();
+    } else {
+        std::vector<std::thread> pool;
+        for (unsigned t=0; t<n_workers; ++t) pool.emplace_back(worker);
+        for (auto& th : pool) th.join();
+    }
+    if (!err_msg.empty()) throw std::runtime_error(err_msg);
+
+    // Emit results in view order (after compute, so threaded output stays ordered).
     if (json) {
         std::cout << "{\n  \"meta\": {\n"
                   << "    \"mesh\": \"" << esc(obj) << "\",\n"
-                  << "    \"precision\": \"" << (sizeof(T)==4?"float":"double") << "\"\n"
+                  << "    \"precision\": \"" << (sizeof(T)==4?"float":"double") << "\",\n"
+                  << "    \"views\": " << batch.size() << "\n"
                   << "  },\n  \"results\": [\n";
     }
-
     for (size_t k=0; k<batch.size(); ++k) {
         const auto& b = batch[k];
-        
-        // Handle Per-View Data Loading
-        // Optimization: Only reload if this view specifies a DIFFERENT file than current
-        // (Note: For simplicity here we just reload if specified, real app might cache)
-        if (!b.data_file.empty()) load_values(b.data_file, mesh);
-        
-        T res = (b.resolution > 0) ? (T)b.resolution : (T)default_res;
-        ViewResult<T> r = process_view({(T)b.nx, (T)b.ny, (T)b.nz}, mesh, res, cull, renderer);
-        
-        // Output Image?
-        if (!out_pre.empty()) {
-            std::ostringstream oss; oss << out_pre << "_" << std::setw(4) << std::setfill('0') << k << ".ppm";
-            save_ppm(renderer, oss.str(), r.min_val, r.max_val);
-        }
-
+        const auto& r = results[k];
         if (json) {
             std::cout << "    {\n"
                       << "      \"idx\": " << k << ",\n"
-                      << "      \"normal\": [" << b.nx << "," << b.ny << "," << b.nz << "],\n"
-                      << "      \"area\": " << r.area << ",\n"
-                      << "      \"avg\": " << r.average_value << ",\n"
+                      << "      \"normal\": [" << jnum(b.nx) << "," << jnum(b.ny) << "," << jnum(b.nz) << "],\n"
+                      << "      \"resolution\": " << jnum(view_res[k]) << ",\n"
+                      << "      \"area\": " << jnum(r.area) << ",\n"
                       << "      \"pixels\": " << r.covered_pixels << ",\n"
-                      << "      \"time\": " << r.time_seconds << "\n"
+                      << "      \"width\": " << r.image_width << ",\n"
+                      << "      \"height\": " << r.image_height << ",\n";
+            if (r.has_field) {
+                std::cout << "      \"average\": " << jnum(r.average_value) << ",\n"
+                          << "      \"integral\": " << jnum(r.integral) << ",\n"
+                          << "      \"min\": " << jnum(r.min_val) << ",\n"
+                          << "      \"max\": " << jnum(r.max_val) << ",\n";
+            } else {
+                std::cout << "      \"average\": null,\n"
+                          << "      \"integral\": null,\n"
+                          << "      \"min\": null,\n"
+                          << "      \"max\": null,\n";
+            }
+            std::cout << "      \"image\": " << (r.output_image.empty() ? "null" : "\"" + esc(r.output_image) + "\"") << ",\n"
+                      << "      \"time\": " << jnum(r.time_seconds) << "\n"
                       << "    }" << (k==batch.size()-1?"":",") << "\n";
         } else {
-            std::cout << "View " << k << " | Area: " << r.area << " | Avg: " << r.average_value
+            std::cout << "View " << k << " | Area: " << r.area;
+            if (r.has_field)
+                std::cout << " | Avg: " << r.average_value << " | Integral: " << r.integral;
+            std::cout << " | Pixels: " << r.covered_pixels
                       << " | Time: " << r.time_seconds << "s\n";
         }
-        
-        // Restore default data if we switched it temporarily?
-        // For efficiency, we assume subsequent views use what is loaded unless changed.
-        // If batch mixed global/local indiscriminately, we'd need to track state carefully.
     }
     if (json) std::cout << "  ]\n}\n";
 }
@@ -409,34 +521,49 @@ void run_app(const std::string& obj, const std::string& default_data, const std:
    ---------------------- */
 void print_help(const char* prog) {
     std::cout << "FlatLand: Mesh Projection & Rasterization Tool\n"
-              << "Usage: " << prog << " [mesh.obj] [options]\n\n"
+              << "Usage: " << prog << " <mesh.obj> [options]\n\n"
               << "Core Options:\n"
-              << "  -v <x> <y> <z>        Add a single view direction. Can be repeated multiple times.\n"
-              << "  -b, --batch <file>    Load views from a file. See 'Batch Format' below.\n"
-              << "                        (Note: Views from -v and -b are additive)\n\n"
-              << "Simulation Parameters:\n"
-              << "  -r, --res <val>       Set default pixel resolution (default: 0.001).\n"
-              << "                        Used if a batch entry does not specify its own resolution.\n"
-              << "  -d, --data <file>     Path to default scalar data file (node or face values).\n"
-              << "                        Used if a batch entry does not specify its own data file.\n"
-              << "  --no-cull             Disable backface culling (renders all matching faces).\n"
-              << "  -p, --precision <mode> Set math precision: 'float' (default, faster) or 'double' (more accurate).\n\n"
+              << "  -v, --view <x> <y> <z>   Add a single view direction. Repeatable.\n"
+              << "  -b, --batch <file>       Load views from a file (see 'Batch Format').\n"
+              << "                           Views from -v and -b are additive.\n\n"
+              << "Analysis Parameters:\n"
+              << "  -r, --res <val>          Default pixel resolution (default: 0.001).\n"
+              << "                           Used when a batch entry omits its own resolution.\n"
+              << "  -d, --data <file>        Default scalar field file (one value per line;\n"
+              << "                           length must equal the vertex or face count).\n"
+              << "  -p, --precision <mode>   Math precision: 'float' (default) or 'double'.\n"
+              << "      --no-cull            Disable backface culling (render all faces).\n"
+              << "  -t, --threads <n>        Worker threads for batch views (default: auto).\n\n"
               << "Output Control:\n"
-              << "  -o, --out <prefix>    Save heatmap images with this filename prefix.\n"
-              << "                        Files named: <prefix>_<view_index>.ppm\n"
-              << "  -j, --json            Output results in structured JSON format to stdout.\n"
-              << "  -h, --help            Show this help message.\n\n"
+              << "  -o, --out <prefix>       Save PPM heatmaps as <prefix>_<idx>.ppm.\n"
+              << "  -j, --json               Emit structured JSON to stdout.\n"
+              << "  -h, --help               Show this help message.\n\n"
+              << "Per-View Outputs:\n"
+              << "  area      visible projected area (covered_pixels * resolution^2)\n"
+              << "  average   mean field value over visible pixels (with -d / batch data)\n"
+              << "  integral  area integral of the field: sum(value * pixel_area).\n"
+              << "            Supply a radiance field to get radiant intensity, etc.\n"
+              << "  min/max   field extremes over visible pixels\n\n"
               << "Batch File Format:\n"
-              << "  Each line represents a view. Lines starting with # are comments.\n"
+              << "  One view per line; '#' starts a comment.\n"
               << "  Columns: <nx> <ny> <nz> [resolution] [data_file_path]\n"
-              << "  Examples:\n"
-              << "    1.0 0.0 0.0               (Uses default resolution & default data)\n"
-              << "    0.0 1.0 0.0 0.005         (Overrides resolution, uses default data)\n"
-              << "    0.0 0.0 1.0 0.002 data.txt (Overrides both)\n\n"
-              << "Precedence Rules:\n"
-              << "  1. Batch file specific settings (resolution/data) take highest precedence.\n"
-              << "  2. Command line flags (-r, -d) set the defaults for any view missing those details.\n"
-              << "  3. Single views (-v) always use the command-line default resolution and data.\n";
+              << "    1.0 0.0 0.0                 (default resolution & data)\n"
+              << "    0.0 1.0 0.0 0.005           (override resolution)\n"
+              << "    0.0 0.0 1.0 0.002 data.txt  (override both)\n";
+}
+
+// Parse the value following a flag; errors if it is missing.
+static std::string need_value(int& i, int argc, char* argv[], const std::string& flag) {
+    if (i+1 >= argc) throw std::runtime_error("option '" + flag + "' requires an argument");
+    return argv[++i];
+}
+
+static double parse_double(const std::string& s, const std::string& ctx) {
+    try {
+        size_t pos; double d = std::stod(s, &pos);
+        if (pos != s.size()) throw std::invalid_argument("");
+        return d;
+    } catch (...) { throw std::runtime_error("invalid number '" + s + "' for " + ctx); }
 }
 
 int main(int argc, char* argv[]) {
@@ -445,66 +572,91 @@ int main(int argc, char* argv[]) {
     std::string obj_file, data_file, batch_file, out_pre, prec="float";
     double res = 0.001;
     bool json=false, cull=true;
+    unsigned threads = 0; // 0 => auto
     std::vector<BatchEntry> batch;
 
-    int i = 1;
-    if (argv[1][0] != '-') { obj_file = argv[1]; i++; }
-
-    for (; i<argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "-h" || arg == "--help") { print_help(argv[0]); return 0; }
-        else if (arg == "-d") { if(i+1<argc) data_file=argv[++i]; }
-        else if (arg == "-b") { if(i+1<argc) batch_file=argv[++i]; }
-        else if (arg == "-o") { if(i+1<argc) out_pre=argv[++i]; }
-        else if (arg == "-r") { if(i+1<argc) res=std::stod(argv[++i]); }
-        else if (arg == "-p" || arg == "--precision") { if(i+1<argc) prec=argv[++i]; }
-        else if (arg == "-j" || arg == "--json") { json=true; }
-        else if (arg == "--no-cull") { cull=false; }
-        else if (arg == "-v") {
-            if (i+3<argc) {
-                batch.push_back({std::stod(argv[i+1]), std::stod(argv[i+2]), std::stod(argv[i+3]), -1.0, ""});
-                i+=3;
+    try {
+        for (int i=1; i<argc; ++i) {
+            std::string a = argv[i];
+            if      (a == "-h" || a == "--help")      { print_help(argv[0]); return 0; }
+            else if (a == "-d" || a == "--data")      { data_file  = need_value(i,argc,argv,a); }
+            else if (a == "-b" || a == "--batch")     { batch_file = need_value(i,argc,argv,a); }
+            else if (a == "-o" || a == "--out")       { out_pre    = need_value(i,argc,argv,a); }
+            else if (a == "-r" || a == "--res")       { res = parse_double(need_value(i,argc,argv,a), "-r/--res"); }
+            else if (a == "-p" || a == "--precision") { prec = need_value(i,argc,argv,a); }
+            else if (a == "-t" || a == "--threads")   { threads = (unsigned)parse_double(need_value(i,argc,argv,a), "-t/--threads"); }
+            else if (a == "-j" || a == "--json")      { json = true; }
+            else if (a == "--no-cull")                { cull = false; }
+            else if (a == "-v" || a == "--view") {
+                if (i+3 >= argc) throw std::runtime_error("option '" + a + "' requires three numbers: x y z");
+                double x = parse_double(argv[i+1], "-v x");
+                double y = parse_double(argv[i+2], "-v y");
+                double z = parse_double(argv[i+3], "-v z");
+                if (x==0 && y==0 && z==0) throw std::runtime_error("view direction cannot be the zero vector");
+                batch.push_back({x, y, z, -1.0, ""});
+                i += 3;
             }
+            else if (!a.empty() && a[0] == '-') {
+                throw std::runtime_error("unknown option '" + a + "' (try --help)");
+            }
+            else if (obj_file.empty()) { obj_file = a; }
+            else throw std::runtime_error("unexpected argument '" + a + "' (mesh already set to '" + obj_file + "')");
         }
-        else if (obj_file.empty() && arg[0]!='-') { obj_file = arg; }
-    }
 
-    if (obj_file.empty()) { std::cerr << "Error: No OBJ file.\n"; return 1; }
+        if (obj_file.empty()) throw std::runtime_error("no mesh (.obj) file specified");
+        if (prec != "float" && prec != "double") throw std::runtime_error("precision must be 'float' or 'double', got '" + prec + "'");
+        if (res <= 0) throw std::runtime_error("resolution must be positive");
 
-    // Parse Batch File if present
-    if (!batch_file.empty()) {
-        std::ifstream f(batch_file);
-        if (!f.is_open()) { std::cerr << "Error: Cannot open batch file.\n"; return 1; }
-        std::string line;
-        while (std::getline(f, line)) {
-            size_t c = line.find('#');
-            if (c != std::string::npos) line = line.substr(0, c);
-            std::stringstream ss(line);
-            double nx, ny, nz;
-            if (ss >> nx >> ny >> nz) {
-                BatchEntry be = {nx, ny, nz, -1.0, ""};
-                // Optional columns
-                double r_temp;
-                if (ss >> r_temp) {
-                    be.resolution = r_temp;
-                    std::string d_temp;
-                    if (ss >> d_temp) be.data_file = d_temp;
+        // Parse batch file (additive with any -v views)
+        if (!batch_file.empty()) {
+            std::ifstream f(batch_file);
+            if (!f.is_open()) throw std::runtime_error("cannot open batch file '" + batch_file + "'");
+            // Relative data-file paths in a batch are resolved against the batch file's
+            // directory, so a committed time-series case works from any CWD.
+            std::string batch_dir;
+            size_t slash = batch_file.find_last_of('/');
+            if (slash != std::string::npos) batch_dir = batch_file.substr(0, slash + 1);
+            std::string line;
+            int lineno = 0;
+            while (std::getline(f, line)) {
+                ++lineno;
+                size_t c = line.find('#');
+                if (c != std::string::npos) line = line.substr(0, c);
+                std::stringstream ss(line);
+                double nx, ny, nz;
+                if (ss >> nx >> ny >> nz) {
+                    if (nx==0 && ny==0 && nz==0)
+                        throw std::runtime_error("batch line " + std::to_string(lineno) + ": zero view vector");
+                    BatchEntry be = {nx, ny, nz, -1.0, ""};
+                    double r_temp;
+                    if (ss >> r_temp) {
+                        if (r_temp <= 0) throw std::runtime_error("batch line " + std::to_string(lineno) + ": resolution must be positive");
+                        be.resolution = r_temp;
+                        std::string d_temp;
+                        if (ss >> d_temp)
+                            be.data_file = (d_temp[0] == '/') ? d_temp : batch_dir + d_temp;
+                    }
+                    batch.push_back(be);
+                } else if (!line.empty() && line.find_first_not_of(" \t\r\n") != std::string::npos) {
+                    throw std::runtime_error("batch line " + std::to_string(lineno) + ": expected '<nx> <ny> <nz> ...'");
                 }
-                batch.push_back(be);
             }
         }
-    }
-    
-    if (batch.empty()) { std::cerr << "Error: No views specified.\n"; return 1; }
 
-    // Dispatch
-    if (!json) std::cerr << "Running with " << prec << " precision...\n";
-    
-    if (prec == "float") {
-        run_app<float>(obj_file, data_file, out_pre, batch, res, cull, json);
-    } else {
-        run_app<double>(obj_file, data_file, out_pre, batch, res, cull, json);
-    }
+        if (batch.empty()) throw std::runtime_error("no views specified (use -v or -b)");
 
+        unsigned hw = std::thread::hardware_concurrency();
+        if (threads == 0) threads = hw ? hw : 1;
+
+        if (!json) std::cerr << "Running " << batch.size() << " view(s) with " << prec
+                             << " precision on " << threads << " thread(s)...\n";
+
+        if (prec == "float") run_app<float>(obj_file, data_file, out_pre, batch, res, cull, json, threads);
+        else                 run_app<double>(obj_file, data_file, out_pre, batch, res, cull, json, threads);
+
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        return 1;
+    }
     return 0;
 }

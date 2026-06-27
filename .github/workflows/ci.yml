@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: Build & test (${{ matrix.os }} / ${{ matrix.cxx }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        cxx: [g++, clang++]
+        exclude:
+          # macOS g++ is an alias for clang; one clang job there is enough.
+          - os: macos-latest
+            cxx: g++
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (dependency-free, single recipe)
+        run: make CXX=${{ matrix.cxx }}
+
+      - name: Run test suite
+        run: ./tests/run_tests.sh ./flatland
+
+      - name: Smoke-test the committed time-series example
+        run: |
+          ./flatland examples/sphere_areas/sphere_coarse.obj \
+            -b examples/with_fields/timeseries_demo/timeseries.txt -j > /dev/null
+
+  cmake-build:
+    name: CMake build (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure & build with CMake
+        run: |
+          cmake -S src -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release
+      - name: Run test suite against CMake binary
+        run: ./tests/run_tests.sh ./build/flatland
