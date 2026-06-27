@@ -92,6 +92,65 @@ near "$(jget "$TMP/nr.json" average)" 2.0 0.001 "batch data file without resolut
 "$BIN" "$CUBE" -v 1 0 0 -p double -j >/dev/null 2>&1 && ok "double precision runs" || bad "double precision"
 "$BIN" "$CUBE" -v 1 0 0 -p quad  >/dev/null 2>&1; expect_fail $? "invalid precision rejected"
 
+echo "== Mesh formats (STL) =="
+# Build ASCII + binary STL of the cube and confirm both yield area 1.
+python3 - "$CUBE" "$TMP/cube_ascii.stl" "$TMP/cube_bin.stl" <<'PY'
+import sys, struct
+obj, ascii_out, bin_out = sys.argv[1:4]
+verts=[]; faces=[]
+for line in open(obj):
+    p=line.split()
+    if not p: continue
+    if p[0]=="v": verts.append(tuple(map(float,p[1:4])))
+    elif p[0]=="f":
+        idx=[int(t.split("/")[0])-1 for t in p[1:]]
+        for k in range(2,len(idx)): faces.append((idx[0],idx[k-1],idx[k]))
+def nrm(a,b,c):
+    ux,uy,uz=(b[0]-a[0],b[1]-a[1],b[2]-a[2]); vx,vy,vz=(c[0]-a[0],c[1]-a[1],c[2]-a[2])
+    return (uy*vz-uz*vy, uz*vx-ux*vz, ux*vy-uy*vx)
+with open(ascii_out,"w") as f:
+    f.write("solid cube\n")
+    for a,b,c in faces:
+        f.write("facet normal %f %f %f\nouter loop\n"%nrm(verts[a],verts[b],verts[c]))
+        for vi in (a,b,c): f.write("vertex %f %f %f\n"%verts[vi])
+        f.write("endloop\nendfacet\n")
+    f.write("endsolid cube\n")
+with open(bin_out,"wb") as f:
+    f.write(b"\0"*80); f.write(struct.pack("<I",len(faces)))
+    for a,b,c in faces:
+        f.write(struct.pack("<3f",*nrm(verts[a],verts[b],verts[c])))
+        for vi in (a,b,c): f.write(struct.pack("<3f",*verts[vi]))
+        f.write(struct.pack("<H",0))
+PY
+"$BIN" "$TMP/cube_ascii.stl" -v 1 0 0 -r 0.01 -j 2>/dev/null > "$TMP/sa.json"
+near "$(jget "$TMP/sa.json" area)" 1.0 0.01 "ASCII STL projected area == 1"
+"$BIN" "$TMP/cube_bin.stl" -v 1 0 0 -r 0.01 -j 2>/dev/null > "$TMP/sb.json"
+near "$(jget "$TMP/sb.json" area)" 1.0 0.01 "binary STL projected area == 1"
+
+echo "== Field matrix (time series in one file) =="
+# 26 vertex rows, 3 columns with values 1,2,3 -> selecting @c gives average c+1.
+awk 'BEGIN{for(i=0;i<26;i++) print 1.0, 2.0, 3.0}' > "$TMP/matrix.txt"
+"$BIN" "$CUBE" -v 1 0 0 -r 0.02 -d "$TMP/matrix.txt@0" -j 2>/dev/null > "$TMP/m0.json"
+near "$(jget "$TMP/m0.json" average)" 1.0 0.001 "matrix column 0 selected"
+"$BIN" "$CUBE" -v 1 0 0 -r 0.02 -d "$TMP/matrix.txt@2" -j 2>/dev/null > "$TMP/m2.json"
+near "$(jget "$TMP/m2.json" average)" 3.0 0.001 "matrix column 2 selected"
+"$BIN" "$CUBE" -v 1 0 0 -d "$TMP/matrix.txt@9" >/dev/null 2>&1; expect_fail $? "out-of-range column rejected"
+
+echo "== Angle views =="
+# -a 0 0 is +X; cube area along an axis is 1.
+"$BIN" "$CUBE" -a 0 0 -r 0.01 -j 2>/dev/null > "$TMP/a.json"
+near "$(jget "$TMP/a.json" area)" 1.0 0.01 "angle view (-a 0 0 == +X) area == 1"
+# Batch angle line.
+printf "a 90 0 0.01\n" > "$TMP/ang.txt"
+"$BIN" "$CUBE" -b "$TMP/ang.txt" -j 2>/dev/null > "$TMP/ab.json"
+near "$(jget "$TMP/ab.json" area)" 1.0 0.01 "batch angle line area == 1"
+
+echo "== Field mode override =="
+awk 'BEGIN{for(i=0;i<48;i++) print 7.0}' > "$TMP/face48.txt"
+"$BIN" "$CUBE" -v 1 0 0 -r 0.02 -d "$TMP/face48.txt" --field-mode face -j 2>/dev/null > "$TMP/fm.json"
+near "$(jget "$TMP/fm.json" average)" 7.0 0.001 "--field-mode face applied"
+"$BIN" "$CUBE" -v 1 0 0 -d "$TMP/matrix.txt@0" --field-mode face >/dev/null 2>&1; expect_fail $? "--field-mode count mismatch rejected"
+
 echo
 echo "Results: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

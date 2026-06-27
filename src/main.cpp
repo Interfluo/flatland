@@ -29,11 +29,15 @@
 #include <algorithm>
 #include <limits>
 #include <memory>
+#include <map>
 #include <thread>
 #include <atomic>
 #include <mutex>
 #include <cstdlib>
 #include <clocale>
+#include <cstring>
+#include <cstdint>
+#include <cctype>
 #include <stdexcept>
 
 /* ----------------------
@@ -99,6 +103,14 @@ template <typename T> inline T dot(const Vec3<T>& a, const Vec3<T>& b) { return 
 template <typename T> inline Vec3<T> cross(const Vec3<T>& a, const Vec3<T>& b) { return {a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x}; }
 template <typename T> inline Vec3<T> operator-(const Vec3<T>& a, const Vec3<T>& b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 template <typename T> inline Vec3<T> normalize(const Vec3<T>& v) { T n = std::sqrt(dot(v,v)); return n>0 ? Vec3<T>{v.x/n, v.y/n, v.z/n} : Vec3<T>{0,0,0}; }
+
+// Convert an azimuth/elevation pair (degrees) into a unit view direction.
+// Azimuth sweeps around +Z measured from +X; elevation rises above the XY plane.
+inline Vec3<double> angle_to_dir(double az_deg, double el_deg) {
+    const double PI = 3.14159265358979323846;
+    double az = az_deg * PI / 180.0, el = el_deg * PI / 180.0;
+    return { std::cos(el)*std::cos(az), std::cos(el)*std::sin(az), std::sin(el) };
+}
 
 /* ----------------------
    Renderer (one per worker thread)
@@ -179,7 +191,7 @@ void rasterize(const TriProjected<T>& tri, Renderer<T>& r, T xmin, T ymin, T pix
 /* ----------------------
    IO & Loaders
    ---------------------- */
-// Templated OBJ loader to support float/double geometry.
+// Templated OBJ loader (vertices + triangulated faces) to support float/double.
 template <typename T>
 Mesh<T> load_obj(const std::string& filename) {
     Mesh<T> mesh;
@@ -207,6 +219,69 @@ Mesh<T> load_obj(const std::string& filename) {
                 mesh.faces.push_back({idxs[0], idxs[k-1], idxs[k]});
         }
     }
+    return mesh;
+}
+
+// STL loader, auto-detecting binary vs ASCII. STL stores independent per-triangle
+// vertices (no shared indexing), so each triangle contributes three fresh vertices.
+template <typename T>
+Mesh<T> load_stl(const std::string& filename) {
+    std::ifstream file(filename, std::ios::binary);
+    if (!file.is_open()) throw std::runtime_error("cannot open mesh file '" + filename + "'");
+    std::string buf((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    Mesh<T> mesh;
+
+    // A binary STL is exactly 84 + 50*ntri bytes; this is the robust discriminator
+    // (the leading "solid" keyword is NOT reliable — some binary files contain it).
+    bool binary = false;
+    uint32_t ntri = 0;
+    if (buf.size() >= 84) {
+        std::memcpy(&ntri, buf.data() + 80, 4);
+        if (buf.size() == 84ull + 50ull * ntri) binary = true;
+    }
+
+    if (binary) {
+        mesh.vertices.reserve((size_t)ntri * 3);
+        mesh.faces.reserve(ntri);
+        for (uint32_t t = 0; t < ntri; ++t) {
+            const char* tri = buf.data() + 84 + (size_t)t * 50;
+            float v[9];
+            std::memcpy(v, tri + 12, 36);   // skip the 12-byte facet normal, read 3 vertices
+            int base = (int)mesh.vertices.size();
+            mesh.vertices.push_back({(T)v[0],(T)v[1],(T)v[2]});
+            mesh.vertices.push_back({(T)v[3],(T)v[4],(T)v[5]});
+            mesh.vertices.push_back({(T)v[6],(T)v[7],(T)v[8]});
+            mesh.faces.push_back({base, base+1, base+2});
+        }
+    } else {
+        std::istringstream is(buf);
+        std::string line, tok;
+        int vc = 0;
+        while (std::getline(is, line)) {
+            std::istringstream ls(line);
+            if (!(ls >> tok) || tok != "vertex") continue;
+            double x,y,z;
+            if (ls >> x >> y >> z) {
+                mesh.vertices.push_back({(T)x,(T)y,(T)z});
+                if (++vc == 3) { int b=(int)mesh.vertices.size()-3; mesh.faces.push_back({b,b+1,b+2}); vc=0; }
+            }
+        }
+    }
+    return mesh;
+}
+
+// Dispatch by file extension (.stl -> STL, otherwise OBJ), then validate.
+template <typename T>
+Mesh<T> load_mesh(const std::string& filename) {
+    auto ends_with_ci = [&](const char* ext) {
+        size_t n = std::strlen(ext);
+        if (filename.size() < n) return false;
+        for (size_t i=0;i<n;++i)
+            if (std::tolower(filename[filename.size()-n+i]) != ext[i]) return false;
+        return true;
+    };
+    Mesh<T> mesh = ends_with_ci(".stl") ? load_stl<T>(filename) : load_obj<T>(filename);
+
     if (mesh.vertices.empty()) throw std::runtime_error("mesh '" + filename + "' contains no vertices");
     if (mesh.faces.empty())    throw std::runtime_error("mesh '" + filename + "' contains no faces");
 
@@ -222,31 +297,86 @@ Mesh<T> load_obj(const std::string& filename) {
     return mesh;
 }
 
-// Fast field loader: slurp the whole file and parse with strtod (far faster than
-// iostream extraction for the time-series case of thousands of field files).
-// Reuses `field.values` storage so per-timestep reloads don't churn allocations.
+/* ----------------------
+   Scalar Fields
+   ----------------------
+   A field file is a matrix: one row per mesh entity (vertex or face), one or more
+   whitespace-separated columns. A column is a timestep, so a whole time series can
+   live in ONE file. The classic "one value per line" file is just the single-column
+   case. A data token may select a column with a trailing '@<col>' (default 0). */
+
+struct FieldToken { std::string path; size_t col; };
+
+// Split "path@3" into {"path", 3}; a bare path means column 0.
+inline FieldToken parse_field_token(const std::string& token) {
+    size_t at = token.find_last_of('@');
+    if (at != std::string::npos && at + 1 < token.size()) {
+        const std::string num = token.substr(at + 1);
+        if (num.find_first_not_of("0123456789") == std::string::npos)
+            return { token.substr(0, at), (size_t)std::stoul(num) };
+    }
+    return { token, 0 };
+}
+
 template <typename T>
-void load_field_into(const std::string& filename, const Mesh<T>& mesh, Field<T>& field) {
+struct FieldMatrix {
+    std::vector<T> data;        // row-major: data[row*ncols + col]
+    size_t nrows = 0, ncols = 0;
+    ValueMode mode = MODE_NONE;
+};
+
+// Load a field matrix and decide node-vs-face from the row count (or `forced`).
+template <typename T>
+void load_matrix_into(const std::string& filename, const Mesh<T>& mesh,
+                      FieldMatrix<T>& m, ValueMode forced) {
     std::ifstream file(filename, std::ios::binary);
     if (!file.is_open()) throw std::runtime_error("cannot open data file '" + filename + "'");
-    std::string buf((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    m.data.clear(); m.nrows = 0; m.ncols = 0;
 
-    field.values.clear();
-    const char* p = buf.c_str();
-    char* end;
-    double d = std::strtod(p, &end);
-    while (end != p) {                 // strtod skips leading whitespace itself
-        field.values.push_back((T)d);
-        p = end;
-        d = std::strtod(p, &end);
+    std::string line;
+    while (std::getline(file, line)) {
+        size_t c = line.find('#');
+        if (c != std::string::npos) line = line.substr(0, c);
+        const char* p = line.c_str(); char* end;
+        size_t before = m.data.size();
+        double d = std::strtod(p, &end);
+        while (end != p) { m.data.push_back((T)d); p = end; d = std::strtod(p, &end); }
+        size_t got = m.data.size() - before;
+        if (got == 0) continue;                 // blank / comment-only line
+        if (m.ncols == 0) m.ncols = got;
+        else if (got != m.ncols)
+            throw std::runtime_error("data file '" + filename + "' row " + std::to_string(m.nrows+1) +
+                " has " + std::to_string(got) + " columns, expected " + std::to_string(m.ncols));
+        ++m.nrows;
     }
+    if (m.nrows == 0) throw std::runtime_error("data file '" + filename + "' has no values");
 
-    if (field.values.size() == mesh.vertices.size())   field.mode = MODE_NODE;
-    else if (field.values.size() == mesh.faces.size()) field.mode = MODE_FACE;
-    else throw std::runtime_error("data file '" + filename + "' has " +
-            std::to_string(field.values.size()) + " values, but mesh has " +
-            std::to_string(mesh.vertices.size()) + " vertices / " +
-            std::to_string(mesh.faces.size()) + " faces");
+    if (forced != MODE_NONE) {
+        size_t need = (forced == MODE_NODE) ? mesh.vertices.size() : mesh.faces.size();
+        if (m.nrows != need)
+            throw std::runtime_error("data file '" + filename + "' has " + std::to_string(m.nrows) +
+                " rows but mesh has " + std::to_string(need) +
+                (forced == MODE_NODE ? " vertices (--field-mode node)" : " faces (--field-mode face)"));
+        m.mode = forced;
+    } else if (m.nrows == mesh.vertices.size()) {
+        m.mode = MODE_NODE;
+    } else if (m.nrows == mesh.faces.size()) {
+        m.mode = MODE_FACE;
+    } else {
+        throw std::runtime_error("data file '" + filename + "' has " + std::to_string(m.nrows) +
+            " rows, but mesh has " + std::to_string(mesh.vertices.size()) + " vertices / " +
+            std::to_string(mesh.faces.size()) + " faces; use --field-mode to disambiguate");
+    }
+}
+
+template <typename T>
+void extract_column(const FieldMatrix<T>& m, size_t col, Field<T>& out) {
+    if (col >= m.ncols)
+        throw std::runtime_error("field column " + std::to_string(col) +
+            " out of range (file has " + std::to_string(m.ncols) + " column(s))");
+    out.values.resize(m.nrows);
+    for (size_t r = 0; r < m.nrows; ++r) out.values[r] = m.data[r * m.ncols + col];
+    out.mode = m.mode;
 }
 
 /* ----------------------
@@ -412,16 +542,28 @@ std::string jnum(T v) {
 template <typename T>
 void run_app(const std::string& obj, const std::string& default_data, const std::string& out_pre,
              const std::vector<BatchEntry>& batch, double default_res, bool cull, bool json,
-             unsigned threads) {
+             unsigned threads, ValueMode forced_mode) {
 
-    Mesh<T> mesh = load_obj<T>(obj);
+    Mesh<T> mesh = load_mesh<T>(obj);
 
-    // A fixed field (-d) is loaded ONCE and shared read-only across all timesteps/threads.
-    std::shared_ptr<Field<T>> default_field;
-    if (!default_data.empty()) {
-        default_field = std::make_shared<Field<T>>();
-        load_field_into(default_data, mesh, *default_field);
-    }
+    // Each distinct field file is loaded ONCE into a shared, read-only cache; workers
+    // then extract their timestep's column from it concurrently. This keeps the
+    // common time-series case (one matrix file shared by every view) from being
+    // re-parsed per thread, while distinct per-view files are still each loaded once.
+    std::map<std::string, std::shared_ptr<FieldMatrix<T>>> mat_cache;
+    std::mutex cache_mtx;
+    auto get_matrix = [&](const std::string& path) -> std::shared_ptr<FieldMatrix<T>> {
+        std::lock_guard<std::mutex> lk(cache_mtx);
+        auto it = mat_cache.find(path);
+        if (it == mat_cache.end()) {
+            auto m = std::make_shared<FieldMatrix<T>>();
+            load_matrix_into(path, mesh, *m, forced_mode);
+            it = mat_cache.emplace(path, m).first;
+        }
+        return it->second;
+    };
+    // Pre-warm + validate the default field up front so a bad -d fails fast.
+    if (!default_data.empty()) get_matrix(parse_field_token(default_data).path);
 
     std::vector<T> view_res(batch.size());
     for (size_t k=0; k<batch.size(); ++k)
@@ -437,21 +579,18 @@ void run_app(const std::string& obj, const std::string& default_data, const std:
     // is O(threads), not O(timesteps). The shared fixed field is never reloaded.
     auto worker = [&]() {
         Renderer<T> renderer;
-        Field<T> local;            // scratch for per-view data files
-        std::string local_path;    // last file loaded into `local`
+        Field<T> local;            // column extracted for the current view
         size_t k;
         while ((k = next.fetch_add(1)) < batch.size()) {
             try {
                 const auto& b = batch[k];
-                const std::string& path = b.data_file.empty() ? default_data : b.data_file;
+                const std::string& token = b.data_file.empty() ? default_data : b.data_file;
 
                 const Field<T>* fp = nullptr;
-                if (path.empty()) {
-                    fp = nullptr;
-                } else if (path == default_data) {
-                    fp = default_field.get();                 // shared, already loaded
-                } else {
-                    if (path != local_path) { load_field_into(path, mesh, local); local_path = path; }
+                if (!token.empty()) {
+                    FieldToken ft = parse_field_token(token);
+                    auto mat = get_matrix(ft.path);           // shared, loaded once
+                    extract_column(*mat, ft.col, local);
                     fp = &local;
                 }
 
@@ -532,16 +671,21 @@ void run_app(const std::string& obj, const std::string& default_data, const std:
    ---------------------- */
 void print_help(const char* prog) {
     std::cout << "FlatLand: Mesh Projection & Rasterization Tool\n"
-              << "Usage: " << prog << " <mesh.obj> [options]\n\n"
+              << "Usage: " << prog << " <mesh.obj|.stl> [options]\n\n"
+              << "Meshes:\n"
+              << "  OBJ and STL (binary or ASCII) are accepted, auto-detected by extension.\n\n"
               << "Core Options:\n"
-              << "  -v, --view <x> <y> <z>   Add a single view direction. Repeatable.\n"
+              << "  -v, --view <x> <y> <z>   Add a view direction (vector). Repeatable.\n"
+              << "  -a, --angle <az> <el>    Add a view by azimuth/elevation in degrees.\n"
+              << "                           az sweeps around +Z from +X; el rises from XY.\n"
               << "  -b, --batch <file>       Load views from a file (see 'Batch Format').\n"
-              << "                           Views from -v and -b are additive.\n\n"
+              << "                           Views from -v/-a and -b are additive.\n\n"
               << "Analysis Parameters:\n"
               << "  -r, --res <val>          Default pixel resolution (default: 0.001).\n"
               << "                           Used when a batch entry omits its own resolution.\n"
-              << "  -d, --data <file>        Default scalar field file (one value per line;\n"
-              << "                           length must equal the vertex or face count).\n"
+              << "  -d, --data <file[@col]>  Default scalar field file (see 'Field Files').\n"
+              << "      --field-mode <m>     Field is 'node', 'face', or 'auto' (default auto,\n"
+              << "                           inferred from row count).\n"
               << "  -p, --precision <mode>   Math precision: 'float' (default) or 'double'.\n"
               << "      --no-cull            Disable backface culling (render all faces).\n"
               << "  -t, --threads <n>        Worker threads for batch views (default: auto).\n\n"
@@ -555,12 +699,19 @@ void print_help(const char* prog) {
               << "  integral  area integral of the field: sum(value * pixel_area).\n"
               << "            Supply a radiance field to get radiant intensity, etc.\n"
               << "  min/max   field extremes over visible pixels\n\n"
+              << "Field Files:\n"
+              << "  One row per mesh entity (vertex or face); one or more columns. Each\n"
+              << "  column is a timestep, so a whole time series fits in ONE file. Select a\n"
+              << "  column with a trailing '@<col>' (default 0), e.g. 'fields.txt@7'.\n"
+              << "  A plain one-value-per-line file is just the single-column case.\n\n"
               << "Batch File Format:\n"
-              << "  One view per line; '#' starts a comment.\n"
-              << "  Columns: <nx> <ny> <nz> [resolution] [data_file_path]\n"
-              << "    1.0 0.0 0.0                 (default resolution & data)\n"
-              << "    0.0 1.0 0.0 0.005           (override resolution)\n"
-              << "    0.0 0.0 1.0 0.002 data.txt  (override both)\n";
+              << "  One view per line; '#' starts a comment. Two line forms:\n"
+              << "    <nx> <ny> <nz> [resolution] [data[@col]]   (direction vector)\n"
+              << "    a <az> <el>    [resolution] [data[@col]]   (azimuth/elevation)\n"
+              << "  resolution and data are optional and order-independent, e.g.:\n"
+              << "    1 0 0                      (default resolution & data)\n"
+              << "    a 45 30 0.005              (angle view, custom resolution)\n"
+              << "    0 1 0 fields.txt@12        (default resolution, column 12 of a series)\n";
 }
 
 // Parse the value following a flag; errors if it is missing.
@@ -588,6 +739,7 @@ int main(int argc, char* argv[]) {
     double res = 0.001;
     bool json=false, cull=true;
     unsigned threads = 0; // 0 => auto
+    ValueMode forced_mode = MODE_NONE; // --field-mode auto by default
     std::vector<BatchEntry> batch;
 
     try {
@@ -602,6 +754,13 @@ int main(int argc, char* argv[]) {
             else if (a == "-t" || a == "--threads")   { threads = (unsigned)parse_double(need_value(i,argc,argv,a), "-t/--threads"); }
             else if (a == "-j" || a == "--json")      { json = true; }
             else if (a == "--no-cull")                { cull = false; }
+            else if (a == "--field-mode") {
+                std::string m = need_value(i,argc,argv,a);
+                if      (m == "node") forced_mode = MODE_NODE;
+                else if (m == "face") forced_mode = MODE_FACE;
+                else if (m == "auto") forced_mode = MODE_NONE;
+                else throw std::runtime_error("--field-mode must be 'node', 'face', or 'auto', got '" + m + "'");
+            }
             else if (a == "-v" || a == "--view") {
                 if (i+3 >= argc) throw std::runtime_error("option '" + a + "' requires three numbers: x y z");
                 double x = parse_double(argv[i+1], "-v x");
@@ -611,6 +770,14 @@ int main(int argc, char* argv[]) {
                 batch.push_back({x, y, z, -1.0, ""});
                 i += 3;
             }
+            else if (a == "-a" || a == "--angle") {
+                if (i+2 >= argc) throw std::runtime_error("option '" + a + "' requires two numbers: azimuth elevation (degrees)");
+                double az = parse_double(argv[i+1], "-a azimuth");
+                double el = parse_double(argv[i+2], "-a elevation");
+                Vec3<double> d = angle_to_dir(az, el);
+                batch.push_back({d.x, d.y, d.z, -1.0, ""});
+                i += 2;
+            }
             else if (!a.empty() && a[0] == '-') {
                 throw std::runtime_error("unknown option '" + a + "' (try --help)");
             }
@@ -618,7 +785,7 @@ int main(int argc, char* argv[]) {
             else throw std::runtime_error("unexpected argument '" + a + "' (mesh already set to '" + obj_file + "')");
         }
 
-        if (obj_file.empty()) throw std::runtime_error("no mesh (.obj) file specified");
+        if (obj_file.empty()) throw std::runtime_error("no mesh file specified (.obj or .stl)");
         if (prec != "float" && prec != "double") throw std::runtime_error("precision must be 'float' or 'double', got '" + prec + "'");
         if (res <= 0) throw std::runtime_error("resolution must be positive");
 
@@ -638,34 +805,47 @@ int main(int argc, char* argv[]) {
                 size_t c = line.find('#');
                 if (c != std::string::npos) line = line.substr(0, c);
                 std::stringstream ss(line);
+                std::string first;
+                if (!(ss >> first)) continue;   // blank / comment-only line
+
+                // A line is either a direction vector "<nx> <ny> <nz> ..." or an
+                // angle "a <az> <el> ..." (degrees). Detect by the first token.
                 double nx, ny, nz;
-                if (ss >> nx >> ny >> nz) {
+                if (first == "a" || first == "A" || first == "angle") {
+                    double az, el;
+                    if (!(ss >> az >> el))
+                        throw std::runtime_error("batch line " + std::to_string(lineno) + ": angle view expects 'a <azimuth> <elevation> ...'");
+                    Vec3<double> d = angle_to_dir(az, el);
+                    nx = d.x; ny = d.y; nz = d.z;
+                } else {
+                    char* endp; nx = std::strtod(first.c_str(), &endp);
+                    if (*endp != '\0' || !(ss >> ny >> nz))
+                        throw std::runtime_error("batch line " + std::to_string(lineno) + ": expected '<nx> <ny> <nz> ...' or 'a <az> <el> ...'");
                     if (nx==0 && ny==0 && nz==0)
                         throw std::runtime_error("batch line " + std::to_string(lineno) + ": zero view vector");
-                    BatchEntry be = {nx, ny, nz, -1.0, ""};
-                    auto resolve = [&](const std::string& p) {
-                        return (!p.empty() && p[0] == '/') ? p : batch_dir + p;
-                    };
-                    // The optional trailing tokens are [resolution] and/or [data_file],
-                    // in that order. We sniff each token: a pure number is a resolution,
-                    // anything else is a data-file path. This lets a view attach data
-                    // without having to restate the default resolution.
-                    std::string tok;
-                    if (ss >> tok) {
-                        char* endp; double rv = std::strtod(tok.c_str(), &endp);
-                        if (*endp == '\0') { // pure number -> resolution
-                            if (rv <= 0) throw std::runtime_error("batch line " + std::to_string(lineno) + ": resolution must be positive");
-                            be.resolution = rv;
-                            std::string d_temp;
-                            if (ss >> d_temp) be.data_file = resolve(d_temp);
-                        } else {             // non-numeric -> data file, default resolution
-                            be.data_file = resolve(tok);
-                        }
-                    }
-                    batch.push_back(be);
-                } else if (!line.empty() && line.find_first_not_of(" \t\r\n") != std::string::npos) {
-                    throw std::runtime_error("batch line " + std::to_string(lineno) + ": expected '<nx> <ny> <nz> ...'");
                 }
+
+                BatchEntry be = {nx, ny, nz, -1.0, ""};
+                auto resolve = [&](const std::string& p) {
+                    return (!p.empty() && p[0] == '/') ? p : batch_dir + p;
+                };
+                // The optional trailing tokens are [resolution] and/or [data_file],
+                // in that order. We sniff each token: a pure number is a resolution,
+                // anything else is a data-file path. This lets a view attach data
+                // without having to restate the default resolution.
+                std::string tok;
+                if (ss >> tok) {
+                    char* endp; double rv = std::strtod(tok.c_str(), &endp);
+                    if (*endp == '\0') { // pure number -> resolution
+                        if (rv <= 0) throw std::runtime_error("batch line " + std::to_string(lineno) + ": resolution must be positive");
+                        be.resolution = rv;
+                        std::string d_temp;
+                        if (ss >> d_temp) be.data_file = resolve(d_temp);
+                    } else {             // non-numeric -> data file, default resolution
+                        be.data_file = resolve(tok);
+                    }
+                }
+                batch.push_back(be);
             }
         }
 
@@ -677,8 +857,8 @@ int main(int argc, char* argv[]) {
         if (!json) std::cerr << "Running " << batch.size() << " view(s) with " << prec
                              << " precision on " << threads << " thread(s)...\n";
 
-        if (prec == "float") run_app<float>(obj_file, data_file, out_pre, batch, res, cull, json, threads);
-        else                 run_app<double>(obj_file, data_file, out_pre, batch, res, cull, json, threads);
+        if (prec == "float") run_app<float>(obj_file, data_file, out_pre, batch, res, cull, json, threads, forced_mode);
+        else                 run_app<double>(obj_file, data_file, out_pre, batch, res, cull, json, threads, forced_mode);
 
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";

@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-"""Generate a time-dependent FlatLand case: rotating view + evolving scalar field.
+"""Generate a time-dependent FlatLand case: orbiting view + evolving scalar field.
 
 Dependency-free: parses the OBJ itself and uses only the Python standard library
-(no numpy / pyvista). This makes the example reproducible with a stock Python 3.
+(no numpy / pyvista), so the example reproduces with a stock Python 3.
 
-For each timestep it writes one node-field file (one value per vertex) and appends
-a line to a batch file of the form expected by `flatland -b`:
+It writes a single multi-column field file (one row per vertex, one column per
+timestep) and a batch file whose lines select a column per timestep:
 
-    <nx> <ny> <nz> <resolution> <field_file>
+    a <azimuth> <elevation> <resolution> field.txt@<t>
+
+The whole time series therefore lives in two files regardless of step count.
 
 Usage:
     python3 generate_field.py <mesh.obj> <out_dir> [num_steps] [resolution]
 
 Example:
-    python3 generate_field.py bunny.obj data 200 0.001
+    python3 generate_field.py bunny.obj data 1000 0.002
     ../../src/build/flatland bunny.obj -b data/timeseries.txt -j > results.json
 """
 import math
@@ -48,31 +50,27 @@ def main():
     xs = [v[0] for v in verts]
     x0, x1 = min(xs), max(xs)
     span = (x1 - x0) or 1.0
+    nx = [(v[0] - x0) / span for v in verts]
 
+    # One field column per timestep; a wave that sweeps along x as time advances.
+    freq = 4.0
+    field_path = os.path.join(out_dir, "field.txt")
+    with open(field_path, "w") as ff:
+        for i in range(len(verts)):
+            row = (f"{math.sin(freq * math.pi * nx[i] - 2.0 * math.pi * t / steps):.6f}"
+                   for t in range(steps))
+            ff.write(" ".join(row) + "\n")
+
+    # Batch: orbit the mesh in azimuth (slight tilt), one column per timestep.
+    # Field path is a bare name; FlatLand resolves it against the batch file's dir.
     batch_path = os.path.join(out_dir, "timeseries.txt")
     with open(batch_path, "w") as batch:
-        batch.write("# nx ny nz resolution field_file  (one timestep per line)\n")
+        batch.write("# a <azimuth> <elevation> <resolution> field.txt@<timestep>\n")
         for t in range(steps):
-            # Field: a wave that sweeps along x as time advances.
-            phase = 2.0 * math.pi * t / steps
-            freq = 4.0
-            # Field file lives beside the batch file; FlatLand resolves the batch's
-            # relative data paths against the batch file's directory, so the batch
-            # only needs the bare filename and the case stays portable.
-            field_name = f"field_{t:04d}.txt"
-            with open(os.path.join(out_dir, field_name), "w") as ff:
-                ff.write("\n".join(
-                    f"{math.sin(freq * math.pi * ((v[0] - x0) / span) - phase):.6f}"
-                    for v in verts
-                ))
-                ff.write("\n")
+            az = 360.0 * t / steps
+            batch.write(f"a {az:.4f} 20 {res} field.txt@{t}\n")
 
-            # View: orbit the mesh about the z-axis with a slight tilt.
-            ang = 2.0 * math.pi * t / steps
-            nx, ny, nz = math.cos(ang), math.sin(ang), 0.3
-            batch.write(f"{nx:.6f} {ny:.6f} {nz:.6f} {res} {field_name}\n")
-
-    print(f"Wrote {steps} timesteps to {batch_path}")
+    print(f"Wrote {steps}-column field to {field_path} and batch to {batch_path}")
 
 
 if __name__ == "__main__":
