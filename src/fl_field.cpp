@@ -1,5 +1,7 @@
 #include "fl_field.hpp"
 
+#include "fl_locale.hpp"
+
 #include <fstream>
 #include <limits>
 #include <stdexcept>
@@ -70,6 +72,7 @@ FieldToken parse_field_token(const std::string& token) {
 template <typename T>
 void load_matrix_into(const std::string& filename, const Mesh<T>& mesh,
                       FieldMatrix<T>& m, ValueMode forced) {
+    CNumericScope c_numeric;          // field files are written with '.'
     std::ifstream file(filename, std::ios::binary);
     if (!file.is_open()) throw std::runtime_error("cannot open data file '" + filename + "'");
     m.data.clear(); m.nrows = 0; m.ncols = 0;

@@ -1,5 +1,7 @@
 #include "fl_io.hpp"
 
+#include "fl_locale.hpp"
+
 #include <algorithm>
 #include <fstream>
 #include <iterator>
@@ -59,7 +61,17 @@ std::string first_token(const std::string& line, size_t& rest) {
 }
 
 RawMesh load_obj_raw(const std::string& filename) {
-    std::ifstream file(filename);
+    // Binary, deliberately, even though OBJ is text. In text mode a Windows CRT
+    // would eat the '\r' of a CRLF file and stop at an embedded 0x1A, so the
+    // same file would parse into different bytes on different platforms. Every
+    // reader below treats '\r' as whitespace (is_space), which is what the
+    // CRLF case in tests/test_parsing.sh already exercises on POSIX, so reading
+    // the raw bytes everywhere makes the two platforms agree by construction.
+    // Numbers in an OBJ are written with '.', so strtod has to agree regardless
+    // of the locale the host process is running in.
+    CNumericScope c_numeric;
+
+    std::ifstream file(filename, std::ios::binary);
     if (!file.is_open()) throw std::runtime_error("cannot open mesh file '" + filename + "'");
 
     RawMesh mesh;
@@ -105,13 +117,15 @@ RawMesh load_obj_raw(const std::string& filename) {
                 while (*s && is_space(*s)) ++s;
                 if (!*s) break;
                 char* end;
-                const long raw = std::strtol(s, &end, 10);
+                // strtoll, not strtol: `long` is 32 bits on Windows, so a file
+                // with a large index would saturate there and not on POSIX.
+                const long long raw = std::strtoll(s, &end, 10);
                 if (end == s)
                     fail(filename, lineno, "face vertex index is not a number");
                 if (raw == 0)
                     fail(filename, lineno, "face vertex index 0 is invalid (OBJ indices are 1-based)");
                 idxs.push_back(raw > 0 ? (int)(raw - 1)
-                                       : (int)(raw + (long)mesh.vertices.size()));
+                                       : (int)(raw + (long long)mesh.vertices.size()));
                 while (*end && !is_space(*end)) ++end;   // skip /vt/vn
                 s = end;
             }
@@ -128,6 +142,7 @@ RawMesh load_obj_raw(const std::string& filename) {
 // STL, auto-detecting binary vs ASCII. STL stores independent per-triangle
 // vertices (no shared indexing), so each triangle contributes three fresh ones.
 RawMesh load_stl_raw(const std::string& filename) {
+    CNumericScope c_numeric;          // ASCII STL parses with >>, also locale-sensitive
     std::ifstream file(filename, std::ios::binary);
     if (!file.is_open()) throw std::runtime_error("cannot open mesh file '" + filename + "'");
     const std::string buf((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());

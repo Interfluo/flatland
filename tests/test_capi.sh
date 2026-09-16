@@ -104,3 +104,71 @@ if "${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -I"$ROOT/include" -fsyntax-onl
 else
     bad "flatland.h from C++ ($(head -2 "$A/hdrxx.log" | tr '\n' ' '))"
 fi
+
+# --- locale independence ----------------------------------------------------
+# Every format FlatLand reads writes numbers with a '.', but strtod uses the
+# decimal separator of the process's LC_NUMERIC locale. The CLI has always
+# guarded this with setlocale(LC_ALL,"C") in main(); a library cannot do that
+# without corrupting state it does not own, so it scopes the C locale to the
+# parsing thread instead. This matters concretely for the bindings: MATLAB and
+# many desktop Python applications call setlocale(LC_ALL,"") at startup, and
+# comma-decimal locales are the default across much of Europe.
+COMMA_LOCALE=""
+for cand in de_DE.utf8 de_DE.UTF-8 fr_FR.utf8 fr_FR.UTF-8 es_ES.utf8 ru_RU.utf8 nl_NL.utf8; do
+    if locale -a 2>/dev/null | grep -qxF "$cand"; then COMMA_LOCALE="$cand"; break; fi
+done
+
+if [ -z "$COMMA_LOCALE" ]; then
+    ok "locale independence (skipped: no comma-decimal locale installed)"
+else
+    cat > "$A/loc.c" <<'EOF'
+#include "flatland.h"
+#include <locale.h>
+#include <stdio.h>
+#include <string.h>
+int main(int argc, char** argv) {
+    if (argc < 3) return 2;
+    if (!setlocale(LC_ALL, argv[1])) { printf("SKIP\n"); return 0; }
+    char before[128];
+    snprintf(before, sizeof before, "%s", setlocale(LC_NUMERIC, NULL));
+
+    fl_mesh* m = NULL;
+    if (fl_mesh_load(argv[2], &m) != FL_OK) { printf("LOAD_FAILED %s\n", fl_last_error()); return 1; }
+    fl_options o; fl_options_init(&o);
+    o.resolution = 0.01; o.precision = FL_PRECISION_DOUBLE;
+    double v[3] = {1,0,0}; fl_result r;
+    if (fl_project(m, v, NULL, 0, &o, &r) != FL_OK) { printf("PROJECT_FAILED\n"); return 1; }
+    fl_mesh_destroy(m);
+
+    /* setlocale returns a pointer into its own static buffer, which the next
+       setlocale call overwrites — so copy it out before switching to C. */
+    char after[128];
+    snprintf(after, sizeof after, "%s", setlocale(LC_NUMERIC, NULL));
+
+    /* Print in the C locale so this program's own output stays parseable. */
+    setlocale(LC_ALL, "C");
+    printf("AREA %.6f VERTS_OK %d LOCALE_PRESERVED %d\n",
+           r.area, 1, strcmp(before, after) == 0 ? 1 : 0);
+    return 0;
+}
+EOF
+    if "$CC_BIN" -std=c99 -I"$ROOT/include" "$A/loc.c" "$ROOT/libflatland.a" \
+            -lstdc++ -lm -pthread -o "$A/loc" 2>"$A/loc_cc.log"; then
+        OUT=$("$A/loc" "$COMMA_LOCALE" "$CUBE" 2>&1)
+        case "$OUT" in
+            SKIP*)
+                ok "locale independence (skipped: $COMMA_LOCALE not usable)" ;;
+            LOAD_FAILED*)
+                bad "a mesh loads under $COMMA_LOCALE (${OUT#LOAD_FAILED })" ;;
+            AREA*)
+                AREA=$(echo "$OUT" | awk '{print $2}')
+                PRES=$(echo "$OUT" | awk '{print $6}')
+                near "$AREA" 1.0 0.01 "a mesh parses correctly under $COMMA_LOCALE"
+                equal "$PRES" "1" "...and the host process's locale is left unchanged" ;;
+            *)
+                bad "locale test produced unexpected output ($OUT)" ;;
+        esac
+    else
+        bad "the locale test compiles ($(tail -1 "$A/loc_cc.log"))"
+    fi
+fi

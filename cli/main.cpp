@@ -217,7 +217,10 @@ int main(int argc, char* argv[]) {
 
         // Parse batch file (additive with any -v views)
         if (!batch_file.empty()) {
-            std::ifstream f(batch_file);
+            // Binary for the same reason the mesh loader is: the tokenizer below
+            // treats '\r' as whitespace, so reading the raw bytes makes a CRLF
+            // batch file parse identically on Windows and on POSIX.
+            std::ifstream f(batch_file, std::ios::binary);
             if (!f.is_open()) throw std::runtime_error("cannot open batch file '" + batch_file + "'");
             // Relative data-file paths in a batch are resolved against the batch file's
             // directory, so a committed time-series case works from any CWD.

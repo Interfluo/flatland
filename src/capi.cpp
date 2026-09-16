@@ -7,7 +7,23 @@
  * the engine's storage clearly separated. No exception may escape into C.
  */
 
-#define FLATLAND_BUILD_SHARED 1
+/*
+ * Which side of the Windows import/export boundary this translation unit is on
+ * is a property of the LINK, not of the source, so the build system says it:
+ *   shared library  ->  -DFLATLAND_BUILD_SHARED  (FL_API = __declspec(dllexport))
+ *   static library  ->  -DFLATLAND_STATIC        (FL_API = empty)
+ * Defining it here unconditionally, as this file used to, stamped dllexport on
+ * the STATIC archive too, which makes every consumer of the .lib re-export the
+ * C ABI from its own binary. Elsewhere (ELF/Mach-O) neither macro has any
+ * effect: FL_API is visibility("default") either way.
+ *
+ * The fallback keeps a hand-rolled compile working: with neither macro set the
+ * header would resolve FL_API to dllimport, and a definition marked dllimport
+ * is ill-formed, so default to the export side rather than fail obscurely.
+ */
+#if !defined(FLATLAND_BUILD_SHARED) && !defined(FLATLAND_STATIC)
+#  define FLATLAND_BUILD_SHARED 1
+#endif
 #include "flatland.h"
 
 #include "fl_batch.hpp"
@@ -113,12 +129,25 @@ const fl_options& effective(const fl_options* opts, fl_options& storage) {
     return storage;
 }
 
+// Reading an enum-typed field whose stored value is outside the enumeration is
+// undefined behaviour, and validating exactly that is this function's job: a
+// foreign caller can put any bit pattern in the struct. An optimizer permitted
+// to assume fl_precision only ever holds 0 or 1 could delete the check. So the
+// raw bytes are copied out as int32 and compared as integers.
+int32_t enum_bits(const void* p) {
+    int32_t v;
+    std::memcpy(&v, p, sizeof(v));
+    return v;
+}
+
 fl_status check_options(const fl_options& o) {
     if (!std::isfinite(o.resolution) || o.resolution <= 0)
         return fail(FL_ERR_INVALID_ARGUMENT, "options.resolution must be a positive, finite number");
-    if (o.precision != FL_PRECISION_FLOAT && o.precision != FL_PRECISION_DOUBLE)
+    const int32_t prec = enum_bits(&o.precision);
+    const int32_t fmode = enum_bits(&o.field_mode);
+    if (prec != FL_PRECISION_FLOAT && prec != FL_PRECISION_DOUBLE)
         return fail(FL_ERR_INVALID_ARGUMENT, "options.precision is not a valid fl_precision value");
-    if (o.field_mode != FL_FIELD_AUTO && o.field_mode != FL_FIELD_NODE && o.field_mode != FL_FIELD_FACE)
+    if (fmode != FL_FIELD_AUTO && fmode != FL_FIELD_NODE && fmode != FL_FIELD_FACE)
         return fail(FL_ERR_INVALID_ARGUMENT, "options.field_mode is not a valid fl_field_mode value");
     if (o.threads < 0)
         return fail(FL_ERR_INVALID_ARGUMENT, "options.threads cannot be negative (0 means one per core)");
@@ -443,7 +472,7 @@ fl_status fl_project(const fl_mesh* mesh_c, const double view_dir[3],
     }
 
     return guard(FL_ERR_NUMERIC, [&]() {
-        if (o.precision == FL_PRECISION_DOUBLE) {
+        if (enum_bits(&o.precision) == FL_PRECISION_DOUBLE) {
             Renderer<double> r;
             project_one<double>(mesh, view_dir, field, field_len, mode, o, out_result, r);
         } else {
@@ -483,7 +512,7 @@ fl_status fl_project_batch(const fl_mesh* mesh_c, const fl_batch_desc* desc,
     }
 
     return guard(FL_ERR_NUMERIC, [&]() {
-        if (o.precision == FL_PRECISION_DOUBLE) batch_impl<double>(mesh, *desc, o, mode, out_results);
+        if (enum_bits(&o.precision) == FL_PRECISION_DOUBLE) batch_impl<double>(mesh, *desc, o, mode, out_results);
         else                                    batch_impl<float>(mesh, *desc, o, mode, out_results);
     });
 }
@@ -515,7 +544,7 @@ fl_status fl_project_image(const fl_mesh* mesh_c, const double view_dir[3],
 
     return guard(FL_ERR_NUMERIC, [&]() {
         std::unique_ptr<fl_image> img(new fl_image());
-        if (o.precision == FL_PRECISION_DOUBLE)
+        if (enum_bits(&o.precision) == FL_PRECISION_DOUBLE)
             image_impl<double>(mesh, view_dir, field, field_len, mode, o, img.get(), out_result);
         else
             image_impl<float>(mesh, view_dir, field, field_len, mode, o, img.get(), out_result);

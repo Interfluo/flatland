@@ -22,7 +22,10 @@ struct ViewResult {
     T min_val = 0;
     T max_val = 0;
     double time_seconds = 0.0;
-    long covered_pixels = 0;
+    // long long, not long: `long` is 32-bit on Windows (LLP64), and the
+    // raster ceiling is 1e9 pixels — inside int32 today, but with no headroom,
+    // and the C ABI reports this field as int64_t.
+    long long covered_pixels = 0;
     int image_width = 0;
     int image_height = 0;
     std::string output_image;
