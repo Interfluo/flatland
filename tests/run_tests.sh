@@ -53,6 +53,18 @@ seq 1 "$(grep -c '^v ' "$CUBE")" | awk '{print 5.0}' > "$TMP/const.txt"
 near "$(jget "$TMP/f.json" average)"  5.0 0.001 "constant field average == 5"
 near "$(jget "$TMP/f.json" integral)" 5.0 0.01 "field integral == const*area"
 
+# 3b. Backface culling must agree with the depth test on a closed mesh.
+# With a field equal to the vertex x-coordinate and the camera looking along +X,
+# the visible surface is the NEAR one (x = -0.5). Culling is only an optimisation:
+# it must not change which surface the z-buffer resolves to. A spatially VARYING
+# field is essential here — a constant field cannot distinguish the two surfaces.
+awk '/^v /{print $2}' "$CUBE" > "$TMP/fx.txt"
+"$BIN" "$CUBE" -v 1 0 0 -r 0.01 -d "$TMP/fx.txt" -p double -j 2>/dev/null > "$TMP/cull.json"
+"$BIN" "$CUBE" -v 1 0 0 -r 0.01 -d "$TMP/fx.txt" -p double --no-cull -j 2>/dev/null > "$TMP/nocull.json"
+near "$(jget "$TMP/cull.json" average)" -0.5 0.001 "culled view resolves to the NEAR surface"
+near "$(jget "$TMP/cull.json" average)" "$(jget "$TMP/nocull.json" average)" 0.001 \
+     "culling agrees with --no-cull on a closed mesh"
+
 echo "== Interface / robustness =="
 # 4. Long flag --res is honored (was silently ignored before v2)
 P=$("$BIN" "$CUBE" --view 1 0 0 --res 0.1 -j 2>/dev/null | grep -m1 '"pixels"' | grep -oE '[0-9]+' | tail -1)

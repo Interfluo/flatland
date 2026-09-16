@@ -442,8 +442,13 @@ ViewResult<T> process_view(const Vec3<T>& view_dir, const Mesh<T>& mesh, const F
         const Vec3<T>& v1 = mesh.vertices[f.v1_idx];
         const Vec3<T>& v2 = mesh.vertices[f.v2_idx];
 
+        // The camera looks ALONG n, so it sits at -infinity on the n axis and the
+        // z-buffer below keeps the smallest dot(v,n) as nearest. A front-facing
+        // triangle therefore has an outward normal opposing n: dot(tri_n, n) < 0.
+        // Culling must agree with that depth convention, otherwise --no-cull and the
+        // default path resolve to opposite surfaces of a closed mesh.
         Vec3<T> tri_n = cross(v1-v0, v2-v0);
-        if (cull && dot(tri_n, n) <= 0) continue;   // keep faces pointing toward the viewer
+        if (cull && dot(tri_n, n) >= 0) continue;   // drop faces pointing away from the viewer
 
         Vec2<T> p0 = {dot(v0,u), dot(v0,v)};
         Vec2<T> p1 = {dot(v1,u), dot(v1,v)};
