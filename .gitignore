@@ -9,7 +9,6 @@ src/build/
 /flatland.lib
 *.o
 *.d
-*.ppm
 
 # Python
 __pycache__/

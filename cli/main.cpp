@@ -19,7 +19,7 @@
 //   - Runtime precision switching (float / double)
 //   - Batch mode with per-view resolution and data files
 //   - Parallel batch processing (standard library threads only)
-//   - PPM heatmap export and structured JSON output
+//   - PNG heatmap export, raw .npy value export, and structured JSON output
 //
 //  No third-party dependencies. C++17.
 //
@@ -67,7 +67,11 @@ void print_help(const char* prog) {
               << "      --no-cull            Disable backface culling (render all faces).\n"
               << "  -t, --threads <n>        Worker threads for batch views (default: auto).\n\n"
               << "Output Control:\n"
-              << "  -o, --out <prefix>       Save PPM heatmaps as <prefix>_<idx>.ppm.\n"
+              << "  -o, --out <prefix>       Save PNG heatmaps as <prefix>_<idx>.png.\n"
+              << "      --npy <prefix>       Save raw per-pixel field values as\n"
+              << "                           <prefix>_<idx>.npy (NumPy float64, NaN off the\n"
+              << "                           silhouette). Needs a field; row 0 is the BOTTOM\n"
+              << "                           row, so plot with origin='lower'.\n"
               << "  -j, --json               Emit structured JSON to stdout.\n"
               << "  -h, --help               Show this help message.\n\n"
               << "Per-View Outputs:\n"
@@ -159,7 +163,7 @@ int main(int argc, char* argv[]) {
 
     if (argc < 2) { print_help(argv[0]); return 1; }
 
-    std::string obj_file, data_file, batch_file, out_pre, prec="float";
+    std::string obj_file, data_file, batch_file, out_pre, npy_pre, prec="float";
     double res = 0.001;
     bool json=false, cull=true;
     unsigned threads = 0; // 0 => auto
@@ -173,6 +177,7 @@ int main(int argc, char* argv[]) {
             else if (a == "-d" || a == "--data")      { data_file  = need_value(i,argc,argv,a); }
             else if (a == "-b" || a == "--batch")     { batch_file = need_value(i,argc,argv,a); }
             else if (a == "-o" || a == "--out")       { out_pre    = need_value(i,argc,argv,a); }
+            else if (a == "--npy")                    { npy_pre    = need_value(i,argc,argv,a); }
             else if (a == "-r" || a == "--res")       { res = parse_double(need_value(i,argc,argv,a), "-r/--res"); }
             else if (a == "-p" || a == "--precision") { prec = need_value(i,argc,argv,a); }
             else if (a == "-t" || a == "--threads")   { threads = parse_threads(need_value(i,argc,argv,a)); }
@@ -319,8 +324,8 @@ int main(int argc, char* argv[]) {
         unsigned hw = std::thread::hardware_concurrency();
         if (threads == 0) threads = hw ? hw : 1;
 
-        if (prec == "float") run_app<float>(obj_file, data_file, out_pre, batch, res, cull, json, threads, forced_mode);
-        else                 run_app<double>(obj_file, data_file, out_pre, batch, res, cull, json, threads, forced_mode);
+        if (prec == "float") run_app<float>(obj_file, data_file, out_pre, npy_pre, batch, res, cull, json, threads, forced_mode);
+        else                 run_app<double>(obj_file, data_file, out_pre, npy_pre, batch, res, cull, json, threads, forced_mode);
 
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";

@@ -68,8 +68,8 @@ const size_t CACHE_BUDGET_BYTES = 256u << 20;   // 256 MB
    ---------------------- */
 template <typename T>
 void run_app(const std::string& obj, const std::string& default_data, const std::string& out_pre,
-             const std::vector<BatchEntry>& batch, double default_res, bool cull, bool json,
-             unsigned threads, ValueMode forced_mode) {
+             const std::string& npy_pre, const std::vector<BatchEntry>& batch,
+             double default_res, bool cull, bool json, unsigned threads, ValueMode forced_mode) {
 
     Mesh<T> mesh = load_mesh<T>(obj);
 
@@ -184,15 +184,29 @@ void run_app(const std::string& obj, const std::string& default_data, const std:
                                               view_res[k], cull, renderers[w]);
 
             // A view that covered nothing has no raster to write. Writing one
-            // anyway would emit the previous view's image, or a malformed 0x0
-            // file; the JSON reports image: null instead.
-            if (!out_pre.empty() && r.image_width > 0 && r.image_height > 0) {
+            // anyway would emit the previous view's image, or a malformed
+            // zero-sized file; the JSON reports image: null instead.
+            const bool has_raster = (r.image_width > 0 && r.image_height > 0);
+
+            if (!out_pre.empty() && has_raster) {
                 std::ostringstream oss;
-                oss << out_pre << "_" << std::setw(4) << std::setfill('0') << k << ".ppm";
+                oss << out_pre << "_" << std::setw(4) << std::setfill('0') << k << ".png";
                 r.output_image = oss.str();
-                save_ppm(renderers[w], r.output_image, r.min_val, r.max_val, r.has_stats);
+                save_png(renderers[w], r.output_image, r.min_val, r.max_val, r.has_stats);
                 std::lock_guard<std::mutex> lk(img_mtx);
                 written_images.push_back(r.output_image);
+            }
+
+            // The colour ramp quantises the field to 8 bits per channel, which
+            // is right for looking at and wrong for computing with. --npy keeps
+            // the actual per-pixel values for whatever comes after the picture.
+            if (!npy_pre.empty() && has_raster && r.has_stats) {
+                std::ostringstream oss;
+                oss << npy_pre << "_" << std::setw(4) << std::setfill('0') << k << ".npy";
+                const std::string path = oss.str();
+                save_npy(renderers[w], path, true);
+                std::lock_guard<std::mutex> lk(img_mtx);
+                written_images.push_back(path);
             }
             results[k] = std::move(r);
         });
@@ -250,8 +264,10 @@ void run_app(const std::string& obj, const std::string& default_data, const std:
 }
 
 template void run_app<float>(const std::string&, const std::string&, const std::string&,
-                             const std::vector<BatchEntry>&, double, bool, bool, unsigned, ValueMode);
+                             const std::string&, const std::vector<BatchEntry>&,
+                             double, bool, bool, unsigned, ValueMode);
 template void run_app<double>(const std::string&, const std::string&, const std::string&,
-                              const std::vector<BatchEntry>&, double, bool, bool, unsigned, ValueMode);
+                              const std::string&, const std::vector<BatchEntry>&,
+                              double, bool, bool, unsigned, ValueMode);
 
 } // namespace flatland

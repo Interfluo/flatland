@@ -21,7 +21,7 @@ struct BatchEntry {
 
 template <typename T>
 void run_app(const std::string& obj, const std::string& default_data, const std::string& out_pre,
-             const std::vector<BatchEntry>& batch, double default_res, bool cull, bool json,
-             unsigned threads, ValueMode forced_mode);
+             const std::string& npy_pre, const std::vector<BatchEntry>& batch,
+             double default_res, bool cull, bool json, unsigned threads, ValueMode forced_mode);
 
 } // namespace flatland

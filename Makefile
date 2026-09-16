@@ -22,6 +22,7 @@ INCLUDES  = -Isrc -Iinclude
 
 # The engine. Shared by the CLI, the C API and anything else that links it.
 CORE_SRC = src/fl_mesh.cpp \
+           src/fl_deflate.cpp \
            src/fl_parallel.cpp \
            src/fl_io.cpp \
            src/fl_field.cpp \

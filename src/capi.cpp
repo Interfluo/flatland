@@ -569,13 +569,25 @@ const double* fl_image_values(const fl_image* i) {
     return (i && i->has_values && !i->values.empty()) ? i->values.data() : nullptr;
 }
 
-fl_status fl_image_write_ppm(const fl_image* i, const char* path) {
+fl_status fl_image_write_png(const fl_image* i, const char* path) {
     if (!i || !path) return fail(FL_ERR_INVALID_ARGUMENT, "image and path must both be non-NULL");
     if (i->w <= 0 || i->h <= 0)
         return fail(FL_ERR_DIMENSION, "this view covered no pixels, so there is no image to write");
     return guard(FL_ERR_IO, [&]() {
-        write_ppm<double>(path, i->w, i->h, i->mask.data(),
+        write_png<double>(path, i->w, i->h, i->mask.data(),
                           i->has_values ? i->values.data() : nullptr, i->min_v, i->max_v);
+    });
+}
+
+fl_status fl_image_write_npy(const fl_image* i, const char* path) {
+    if (!i || !path) return fail(FL_ERR_INVALID_ARGUMENT, "image and path must both be non-NULL");
+    if (i->w <= 0 || i->h <= 0)
+        return fail(FL_ERR_DIMENSION, "this view covered no pixels, so there is nothing to export");
+    if (!i->has_values)
+        return fail(FL_ERR_DIMENSION,
+                    "this view carried no field, so there are no per-pixel values to export");
+    return guard(FL_ERR_IO, [&]() {
+        write_npy<double>(path, i->w, i->h, i->mask.data(), i->values.data());
     });
 }
 

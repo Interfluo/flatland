@@ -119,18 +119,18 @@ equal "$(jraw "$G/sliver.json" max)"      "null" "zero-coverage max is null, not
 # an empty view leaves stale dimensions pointing at a stale (or undersized)
 # value buffer — a wrong image at best, an out-of-bounds read at worst.
 printf '1\n2\n3\n4\n' > "$G/f4.txt"
-rm -f "$G/stale"_*.ppm
+rm -f "$G/stale"_*.png
 printf '0 0 -1 0.01\n1 0 0 0.01\n' > "$G/stale.txt"      # view 1 is exactly edge-on
 "$BIN" "$G/sq.obj" -b "$G/stale.txt" --no-cull -t 1 -o "$G/stale" -j 2>/dev/null > "$G/stale.json"
 expect_ok $? "empty view after a rendered one does not crash"
 equal "$(jget_n "$G/stale.json" pixels 2)" "0" "edge-on view covers no pixels"
 equal "$(jraw_n "$G/stale.json" image 2)" "null" "no image file is claimed for an empty view"
-[ ! -f "$G/stale_0001.ppm" ] && ok "no stale image written for an empty view" \
+[ ! -f "$G/stale_0001.png" ] && ok "no stale image written for an empty view" \
                              || bad "stale image written for an empty view"
 
 # The same hazard with the value buffer: an empty FIRST view, then a view with a
 # field, inside one worker. This is the configuration that segfaulted.
-rm -f "$G/crash"_*.ppm
+rm -f "$G/crash"_*.png
 printf '0 0 1 0.01\n0 0 -1 0.01 f4.txt\n' > "$G/crash.txt"
 "$BIN" "$G/sq.obj" -b "$G/crash.txt" -t 1 -o "$G/crash" >/dev/null 2>&1
 expect_ok $? "empty view followed by a field view does not crash"

@@ -265,7 +265,7 @@ jobs:
   # ---------------------------------------------------------------------------
   # ThreadSanitizer over a genuinely threaded batch: many views, several
   # workers, two shared field matrices read concurrently through the matrix
-  # cache, and PPM writes from every worker.
+  # cache, and PNG writes from every worker.
   # ---------------------------------------------------------------------------
   tsan:
     name: ThreadSanitizer (Linux)

@@ -23,6 +23,7 @@ find_package(Threads REQUIRED)
 
 set(FLATLAND_CORE_SOURCES
     src/fl_mesh.cpp
+    src/fl_deflate.cpp
     src/fl_parallel.cpp
     src/fl_io.cpp
     src/fl_field.cpp

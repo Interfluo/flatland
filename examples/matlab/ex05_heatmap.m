@@ -112,7 +112,7 @@ cmap = jet(256);
 idx  = round(min(max(norm01, 0), 1) * 255) + 1;      % 1 .. 256
 rgb  = ind2rgb(idx, cmap);                            % height-by-width-by-3
 
-% Background for the uncovered pixels, matching FlatLand's own PPM output.
+% Background for the uncovered pixels, matching FlatLand's own PNG output.
 bg   = reshape([30 30 35] / 255, 1, 1, 3);
 keep = double(img.mask);
 rgb  = rgb .* keep + bg .* (1 - keep);                % implicit expansion, R2016b+

@@ -22,7 +22,7 @@ What it covers, in order:
   3. a face field, and the area integral
   4. a whole time series in one parallel batch call
   5. statistics that do not exist, and are reported as None rather than 0.0
-  6. a raster, its coverage mask, and a false-color PPM
+  6. a raster, its coverage mask, a PNG, and the raw values as .npy
   7. a mesh loaded from an OBJ file
 """
 
@@ -129,9 +129,9 @@ def main():
         print("6. raster: %dx%d, %d covered pixels (result says %d)"
               % (image.width, image.height, covered,
                  image.result.covered_pixels))
-        out = os.path.join(os.getcwd(), "example_render.ppm")
-        image.save_ppm(out)
-        print("   wrote %s (%d bytes, false-color P6)\n"
+        out = os.path.join(os.getcwd(), "example_render.png")
+        image.save_png(out)
+        print("   wrote %s (%d bytes, false-colour PNG)\n"
               % (out, os.path.getsize(out)))
         image.close()
 

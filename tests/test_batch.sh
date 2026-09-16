@@ -133,7 +133,7 @@ for k in $(seq 0 5); do printf '1 0 0 0.05 f.txt\n' >> "$B/case/partial.txt"; do
 printf '1 0 0 0.05 no_such_file.txt\n' >> "$B/case/partial.txt"
 "$BIN" "$CUBE" -b "$B/case/partial.txt" -t 2 -o "$B/abortout/p" >/dev/null 2>&1
 expect_fail $? "batch with a bad data file fails"
-LEFT=$(find "$B/abortout" -name '*.ppm' | wc -l | tr -d ' ')
+LEFT=$(find "$B/abortout" -name '*.png' | wc -l | tr -d ' ')
 equal "$LEFT" "0" "...leaving no partial images behind"
 
 sect "Committed example case"

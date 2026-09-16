@@ -65,8 +65,13 @@ through would be indistinguishable from a measurement. Guard on it before
 aggregating a batch.
 
 **Row 0 (Python) / row 1 (MATLAB) of a raster is the BOTTOM row** in mesh
-space, which is the opposite of most image formats. Flip before writing a PNG,
-or use `origin='lower'` / `axis xy` when displaying.
+space, which is the opposite of most image formats. `save_png()` flips on the
+way out; `save_npy()` does not, so plot the array with `origin='lower'` /
+`axis xy`.
+
+**PNG is a picture; NPY is the data.** The colour ramp quantises the field to 8
+bits per channel. If the raster is an input to something else rather than a
+figure, use `save_npy()` (or the CLI's `--npy`) and keep the float64 values.
 
 ## Reference data
 

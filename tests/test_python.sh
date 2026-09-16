@@ -199,5 +199,6 @@ grep -q "agree to 1e-9       : True" "$EX/ex05_heatmap.py.out" \
     || bad "ex05 could not reproduce the integral from the raster"
 
 # ...and it must actually have written the images it claims to.
-[ -s "$EX/sphere_heatmap.ppm" ] && ok "ex05 wrote a PPM" || bad "ex05 wrote no PPM"
+[ -s "$EX/sphere_heatmap.png" ] && ok "ex05 wrote a PNG" || bad "ex05 wrote no PNG"
+[ -s "$EX/sphere_field.npy" ] && ok "ex05 wrote an NPY" || bad "ex05 wrote no NPY"
 [ -s "$EX/sphere_heatmap.png" ] && ok "ex05 wrote a PNG" || bad "ex05 wrote no PNG"

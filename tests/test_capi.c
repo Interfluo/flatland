@@ -231,22 +231,61 @@ int main(int argc, char** argv) {
             for (k = 0; k < n; ++k) if (mask[k]) ++covered;
             check(covered == r.covered_pixels, "mask agrees with covered_pixels");
         }
-        {
-            const char* path = "capi_test_out.ppm";
+        {   /* PNG: check the 8-byte signature, then that it is not trivially
+               tiny, which would mean the compressor emitted nothing. */
+            const char* path = "capi_test_out.png";
             FILE* fp;
-            s = fl_image_write_ppm(img, path);
-            check(s == FL_OK, "fl_image_write_ppm succeeds");
+            s = fl_image_write_png(img, path);
+            check(s == FL_OK, "fl_image_write_png succeeds");
             fp = fopen(path, "rb");
             if (fp) {
-                char hdr[3] = {0,0,0};
-                size_t got = fread(hdr, 1, 2, fp);
+                unsigned char hdr[8];
+                size_t got = fread(hdr, 1, 8, fp);
+                long size;
+                fseek(fp, 0, SEEK_END); size = ftell(fp);
                 fclose(fp);
-                check(got == 2 && hdr[0] == 'P' && hdr[1] == '6', "the PPM has a P6 header");
+                check(got == 8 && hdr[0] == 0x89 && hdr[1] == 'P' && hdr[2] == 'N' &&
+                      hdr[3] == 'G' && hdr[4] == 0x0D && hdr[5] == 0x0A &&
+                      hdr[6] == 0x1A && hdr[7] == 0x0A, "the PNG signature is correct");
+                check(size > 100, "the PNG has a body");
                 remove(path);
             } else {
-                bad_("the PPM has a P6 header", "could not reopen the file");
+                bad_("the PNG signature is correct", "could not reopen the file");
             }
         }
+        {   /* NPY: magic, version, and the exact byte count for the array. */
+            const char* path = "capi_test_out.npy";
+            FILE* fp;
+            s = fl_image_write_npy(img, path);
+            check(s == FL_OK, "fl_image_write_npy succeeds");
+            fp = fopen(path, "rb");
+            if (fp) {
+                unsigned char hdr[10];
+                size_t got = fread(hdr, 1, 10, fp);
+                long size, expect;
+                fseek(fp, 0, SEEK_END); size = ftell(fp);
+                fclose(fp);
+                check(got == 10 && hdr[0] == 0x93 && hdr[1] == 'N' && hdr[2] == 'U' &&
+                      hdr[3] == 'M' && hdr[4] == 'P' && hdr[5] == 'Y' && hdr[6] == 1,
+                      "the NPY magic and version are correct");
+                /* header is padded to a 64-byte boundary, then w*h float64 */
+                expect = (long)fl_image_width(img) * fl_image_height(img) * 8;
+                check(size > expect && (size - expect) % 64 == 0,
+                      "the NPY is a 64-byte-aligned header plus w*h float64");
+                remove(path);
+            } else {
+                bad_("the NPY magic and version are correct", "could not reopen the file");
+            }
+        }
+        {   /* A fieldless raster has a picture but no per-pixel values. */
+            fl_image* plain = NULL;
+            fl_project_image(box, view, NULL, 0, &o, &plain, NULL);
+            check(fl_image_values(plain) == NULL, "a fieldless raster exposes no values");
+            expect_err(fl_image_write_npy(plain, "should_not_exist.npy"),
+                       "exporting NPY from a fieldless raster is refused");
+            fl_image_destroy(plain);
+        }
+
         fl_image_destroy(img);
 
         /* A view that covers nothing must still yield a valid, empty image
@@ -264,8 +303,10 @@ int main(int argc, char** argv) {
                   "an empty view yields a 0x0 image, not a stale one");
             check(r.covered_pixels == 0 && r.has_stats == 0,
                   "an empty view reports no coverage and no statistics");
-            expect_err(fl_image_write_ppm(empty, "should_not_exist.ppm"),
-                       "writing a PPM for an empty view is refused");
+            expect_err(fl_image_write_png(empty, "should_not_exist.png"),
+                       "writing a PNG for an empty view is refused");
+            expect_err(fl_image_write_npy(empty, "should_not_exist.npy"),
+                       "writing an NPY for an empty view is refused");
             fl_image_destroy(empty);
             fl_mesh_destroy(tri);
         }

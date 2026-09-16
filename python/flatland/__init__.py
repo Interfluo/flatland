@@ -399,7 +399,8 @@ _PROTOTYPES = (
     ("fl_image_height", _ct.c_int32, [_image_p]),
     ("fl_image_mask", _c_uint8_p, [_image_p]),
     ("fl_image_values", _c_double_p, [_image_p]),
-    ("fl_image_write_ppm", _ct.c_int, [_image_p, _ct.c_char_p]),
+    ("fl_image_write_png", _ct.c_int, [_image_p, _ct.c_char_p]),
+    ("fl_image_write_npy", _ct.c_int, [_image_p, _ct.c_char_p]),
     ("fl_image_destroy", None, [_image_p]),
     ("fl_field_matrix_load", _ct.c_int, [_ct.c_char_p, _mesh_p, _ct.c_int, _ct.POINTER(_matrix_p)]),
     ("fl_field_matrix_rows", _ct.c_size_t, [_matrix_p]),
@@ -1095,15 +1096,36 @@ class Image(object):
             self._values = self._wrap(ptr, _ct.c_double, "float64", "d")
         return self._values
 
-    def save_ppm(self, path):
-        """Write a false-color binary PPM (P6).
+    def save_png(self, path):
+        """Write a false-color PNG.
 
         Covered pixels are ramped across the field range; a fieldless image is
         written as a white silhouette. An empty (0x0) view has nothing to write
         and raises FlatlandValueError.
+
+        The ramp quantizes the field to 8 bits per channel, which is right for
+        looking at and wrong for computing with -- use save_npy() when the
+        raster is an input to something else rather than a figure.
         """
         ptr = self._check_open()
-        _check(_lib.fl_image_write_ppm(ptr, _fspath(path)))
+        _check(_lib.fl_image_write_png(ptr, _fspath(path)))
+        return path
+
+    def save_npy(self, path):
+        """Write the per-pixel field values as a NumPy .npy file.
+
+        float64, shape (height, width), C order, with NaN wherever nothing was
+        covered. NumPy is NOT required to write it -- the format is produced by
+        the C library -- but np.load() reads it back in one line.
+
+        Row 0 is the BOTTOM row in mesh space, matching .mask and .values, so
+        plot it with origin='lower'.
+
+        Raises FlatlandValueError if the view carried no field, since then there
+        are no per-pixel values to export.
+        """
+        ptr = self._check_open()
+        _check(_lib.fl_image_write_npy(ptr, _fspath(path)))
         return path
 
     def __repr__(self):

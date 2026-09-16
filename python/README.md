@@ -50,7 +50,7 @@ results = mesh.project_batch(views,                    # (K,3)
 
 img = mesh.render((1, 0, 0), field=values)
 img.width, img.height, img.mask, img.values, img.result
-img.save_ppm("view.ppm")
+img.save_png("view.png")
 
 fm = flatland.load_field("timeseries.txt", mesh)       # or mesh.load_field(...)
 fm.shape, fm.rows, fm.cols, fm.field_mode, fm.column(0), fm.to_array()

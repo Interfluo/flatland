@@ -134,6 +134,17 @@ returns `NaN`, and the CLI's JSON emits `null`. Check it before consuming a
 batch; a fabricated zero is indistinguishable from a measurement once it reaches
 your min/max.
 
+**Rasters.** Two output kinds, because they answer different questions. `-o`
+writes a **PNG** — the field mapped through a colour ramp to 8 bits per channel,
+which is right for looking at and wrong for computing with. `--npy` writes the
+**numbers**: NumPy `.npy`, float64, shape `(height, width)`, `NaN` wherever
+nothing was covered. Row 0 is the bottom row in mesh space, so plot it with
+`origin='lower'`.
+
+The PNG encoder is built in — FlatLand links no image or compression library,
+so the dependency-free property survives. On a typical heatmap that is about
+10x smaller than the raw raster; on a silhouette, 100x.
+
 ## Command line
 
 ```shell
@@ -151,7 +162,8 @@ your min/max.
 | `-p, --precision` | float\|double | Working precision (default `float`). |
 | `-t, --threads` | n | Worker threads for batch views (0 = one per core). |
 | `--no-cull` | — | Disable backface culling (render all faces). |
-| `-o, --out` | prefix | Save PPM heatmaps as `<prefix>_<idx>.ppm`. |
+| `-o, --out` | prefix | Save PNG heatmaps as `<prefix>_<idx>.png`. |
+| `--npy` | prefix | Save raw per-pixel field values as `<prefix>_<idx>.npy`. |
 | `-j, --json` | — | Emit structured JSON to stdout. |
 | `-h, --help` | — | Show help. |
 
@@ -203,7 +215,7 @@ extract their timestep's column concurrently.
 ```shell
 ./flatland bunny.obj -v 1 0 0                        # projected area down +X
 ./flatland part.stl -a 45 30                         # STL from azimuth 45, elevation 30
-./flatland engine.obj -v 0 1 1 -d temps.txt -o heat  # field heatmap to heat_0000.ppm
+./flatland engine.obj -v 0 1 1 -d temps.txt -o heat  # field heatmap to heat_0000.png
 ./flatland part.obj -b timeseries.txt -j > out.json  # time series to JSON
 ```
 

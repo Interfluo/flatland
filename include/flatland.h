@@ -362,9 +362,23 @@ FL_API int32_t fl_image_height(const fl_image* image);
 FL_API const uint8_t* fl_image_mask  (const fl_image* image);  /* 1 = covered */
 FL_API const double*  fl_image_values(const fl_image* image);
 
-/* Write a false-color PPM (P6). Covered pixels are ramped across the field range;
- * a fieldless image is written as a white silhouette. */
-FL_API fl_status fl_image_write_ppm(const fl_image* image, const char* path);
+/*
+ * Write the raster to a file. Two kinds, because they answer different
+ * questions:
+ *
+ *   PNG  a picture. The field is mapped through a colour ramp to 8 bits per
+ *        channel, which is right for looking at and wrong for computing with.
+ *        A fieldless image is written as a white silhouette. Rows are flipped
+ *        on the way out, since PNG stores them top-down.
+ *   NPY  the numbers. NumPy's .npy format: float64, shape (height, width), C
+ *        order, with NaN where nothing was covered. Row 0 stays the BOTTOM row,
+ *        matching the rest of this API, so plot it with origin='lower'.
+ *        Fails with FL_ERR_DIMENSION if the view carried no field.
+ *
+ * PNG compression is built in; FlatLand links no image or compression library.
+ */
+FL_API fl_status fl_image_write_png(const fl_image* image, const char* path);
+FL_API fl_status fl_image_write_npy(const fl_image* image, const char* path);
 
 FL_API void fl_image_destroy(fl_image* image);
 

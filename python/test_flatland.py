@@ -349,18 +349,44 @@ def main():
     equal(len(img.values), img.width * img.height, "len(values) == width * height")
     check(img.has_field is True, "has_field is true for a field raster")
 
-    ppm = os.path.join(tmp, "render.ppm")
-    img.save_ppm(ppm)
-    with open(ppm, "rb") as fp:
-        header = fp.read(2)
-    equal(header, b"P6", "save_ppm writes a P6 file")
-    check(os.path.getsize(ppm) > 2, "...with a body")
+    png = os.path.join(tmp, "render.png")
+    img.save_png(png)
+    with open(png, "rb") as fp:
+        header = fp.read(8)
+    equal(header, b"\x89PNG\r\n\x1a\n", "save_png writes a PNG signature")
+    check(os.path.getsize(png) > 100, "...with a body")
+
+    # The .npy keeps the actual values rather than an 8-bit colour ramp, so it
+    # must reproduce the statistics FlatLand reported for the same view.
+    npy = os.path.join(tmp, "render.npy")
+    img.save_npy(npy)
+    with open(npy, "rb") as fp:
+        magic = fp.read(6)
+    equal(magic, b"\x93NUMPY", "save_npy writes the NumPy magic")
+    expect_bytes = img.width * img.height * 8
+    check(os.path.getsize(npy) > expect_bytes, "...and is larger than its payload")
+    check((os.path.getsize(npy) - expect_bytes) % 64 == 0,
+          "...with a 64-byte-aligned header")
+    if flatland.HAS_NUMPY:
+        import numpy as _np
+        arr = _np.load(npy)
+        equal(arr.shape, (img.height, img.width), "the .npy round-trips its shape")
+        equal(str(arr.dtype), "float64", "the .npy round-trips its dtype")
+        # NOT named `covered`: that is a module-level helper this function
+        # already calls, and binding it here would shadow it for the whole body.
+        cov_mask = ~_np.isnan(arr)
+        equal(int(cov_mask.sum()), img.result.covered_pixels,
+              "the .npy has a value exactly where the mask does")
+        near(float(arr[cov_mask].mean()), img.result.average, 1e-9,
+             "the .npy reproduces the reported mean")
 
     plain = box.render((0, 0, 1), resolution=0.01)
     check(plain.values is None, "a fieldless raster has no values")
     equal(len(plain.mask), plain.width * plain.height, "a fieldless mask is still sized")
-    plain.save_ppm(os.path.join(tmp, "silhouette.ppm"))
-    ok("a fieldless raster writes a silhouette PPM")
+    plain.save_png(os.path.join(tmp, "silhouette.png"))
+    ok("a fieldless raster writes a silhouette PNG")
+    raises(FlatlandError, lambda: plain.save_npy(os.path.join(tmp, "nope.npy")),
+           "a fieldless raster has no values to export as NPY")
     plain.close()
 
     # A view that covers nothing must still yield a valid, empty image.
@@ -370,9 +396,11 @@ def main():
     equal(len(empty.mask), 0, "an empty image has an empty mask")
     check(empty.result.covered_pixels == 0 and empty.result.has_stats is False,
           "an empty view reports no coverage and no statistics")
-    raises(FlatlandError, lambda: empty.save_ppm(os.path.join(tmp, "nope.ppm")),
-           "writing a PPM for an empty view is refused")
-    check(not os.path.exists(os.path.join(tmp, "nope.ppm")), "...and writes no file")
+    raises(FlatlandError, lambda: empty.save_png(os.path.join(tmp, "nope.png")),
+           "writing a PNG for an empty view is refused")
+    check(not os.path.exists(os.path.join(tmp, "nope.png")), "...and writes no file")
+    raises(FlatlandError, lambda: empty.save_npy(os.path.join(tmp, "nope2.npy")),
+           "writing an NPY for an empty view is refused")
     empty.close()
     tri.close()
 
@@ -472,7 +500,7 @@ def main():
     # The result and the raster are independent of the mesh that made them.
     near(lr.area, 1.0, 0.02, "a result outlives the mesh it came from")
     equal(covered(limg.mask), lcov, "a raster outlives the mesh it came from")
-    limg.save_ppm(os.path.join(tmp, "detached.ppm"))
+    limg.save_png(os.path.join(tmp, "detached.png"))
     ok("...and can still be written to disk")
     limg.close()
     raises(ValueError, lambda: loaded.project((1, 0, 0)), "a closed mesh refuses to project")
