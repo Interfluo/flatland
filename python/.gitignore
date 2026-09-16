@@ -1,0 +1,3 @@
+# Byte-compiled caches from running the binding or its tests.
+__pycache__/
+*.py[cod]
