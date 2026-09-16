@@ -30,6 +30,8 @@
 #include <thread>
 #include <vector>
 #include <clocale>
+#include <cctype>
+#include <cmath>
 #include <cstddef>
 #include <cstdlib>
 
@@ -97,6 +99,49 @@ static double parse_double(const std::string& s, const std::string& ctx) {
     } catch (...) { throw std::runtime_error("invalid number '" + s + "' for " + ctx); }
 }
 
+// Upper bound on -t. The clamp against the view count still applies; this exists
+// so that an unbounded or negative request cannot reach std::thread at all.
+// Previously `-t -1` wrapped to 4294967295 and `-t 100000` was taken literally,
+// and on a large batch the thread constructor threw while a vector of joinable
+// threads was still live, which terminates the process.
+static const unsigned MAX_THREADS = 4096;
+
+static unsigned parse_threads(const std::string& s) {
+    const double d = parse_double(s, "-t/--threads");
+    if (!std::isfinite(d) || d < 0 || d > (double)MAX_THREADS || d != std::floor(d))
+        throw std::runtime_error("--threads must be a whole number from 0 to " +
+                                 std::to_string(MAX_THREADS) + " (0 means one per core), got '" + s + "'");
+    return (unsigned)d;
+}
+
+// POSIX '/', plus Windows '\' and "C:" so a batch written on either platform
+// resolves the same way.
+static bool is_absolute_path(const std::string& p) {
+    if (p.empty()) return false;
+    if (p[0] == '/' || p[0] == '\\') return true;
+    return p.size() >= 2 && p[1] == ':' && std::isalpha((unsigned char)p[0]);
+}
+
+static std::string resolve_batch_path(const std::string& dir, const std::string& p) {
+    return is_absolute_path(p) ? p : dir + p;
+}
+
+static bool readable(const std::string& p) {
+    if (p.empty()) return false;
+    std::ifstream f(p, std::ios::binary);
+    return f.good();
+}
+
+// True when a batch token names a data file: either directly, or in the
+// "<existing file>@<column>" form.
+static bool names_data_file(const std::string& p) {
+    if (readable(p)) return true;
+    const size_t at = p.find_last_of('@');
+    if (at == std::string::npos || at + 1 >= p.size()) return false;
+    if (p.find_first_not_of("0123456789", at + 1) != std::string::npos) return false;
+    return readable(p.substr(0, at));
+}
+
 } // namespace flatland
 
 using namespace flatland;
@@ -124,7 +169,7 @@ int main(int argc, char* argv[]) {
             else if (a == "-o" || a == "--out")       { out_pre    = need_value(i,argc,argv,a); }
             else if (a == "-r" || a == "--res")       { res = parse_double(need_value(i,argc,argv,a), "-r/--res"); }
             else if (a == "-p" || a == "--precision") { prec = need_value(i,argc,argv,a); }
-            else if (a == "-t" || a == "--threads")   { threads = (unsigned)parse_double(need_value(i,argc,argv,a), "-t/--threads"); }
+            else if (a == "-t" || a == "--threads")   { threads = parse_threads(need_value(i,argc,argv,a)); }
             else if (a == "-j" || a == "--json")      { json = true; }
             else if (a == "--no-cull")                { cull = false; }
             else if (a == "--field-mode") {
@@ -140,6 +185,8 @@ int main(int argc, char* argv[]) {
                 double y = parse_double(argv[i+2], "-v y");
                 double z = parse_double(argv[i+3], "-v z");
                 if (x==0 && y==0 && z==0) throw std::runtime_error("view direction cannot be the zero vector");
+                if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+                    throw std::runtime_error("view direction must be finite");
                 batch.push_back({x, y, z, -1.0, ""});
                 i += 3;
             }
@@ -147,6 +194,8 @@ int main(int argc, char* argv[]) {
                 if (i+2 >= argc) throw std::runtime_error("option '" + a + "' requires two numbers: azimuth elevation (degrees)");
                 double az = parse_double(argv[i+1], "-a azimuth");
                 double el = parse_double(argv[i+2], "-a elevation");
+                if (!std::isfinite(az) || !std::isfinite(el))
+                    throw std::runtime_error("azimuth and elevation must be finite");
                 Vec3<double> d = angle_to_dir(az, el);
                 batch.push_back({d.x, d.y, d.z, -1.0, ""});
                 i += 2;
@@ -160,7 +209,11 @@ int main(int argc, char* argv[]) {
 
         if (obj_file.empty()) throw std::runtime_error("no mesh file specified (.obj or .stl)");
         if (prec != "float" && prec != "double") throw std::runtime_error("precision must be 'float' or 'double', got '" + prec + "'");
-        if (res <= 0) throw std::runtime_error("resolution must be positive");
+        // NaN and +inf both slip past a bare `res <= 0`, then surface far away
+        // as an allocator error naming a std::vector internal.
+        if (!std::isfinite(res) || res <= 0)
+            throw std::runtime_error("resolution must be a positive, finite number, got '" +
+                                     std::to_string(res) + "'");
 
         // Parse batch file (additive with any -v views)
         if (!batch_file.empty()) {
@@ -169,66 +222,93 @@ int main(int argc, char* argv[]) {
             // Relative data-file paths in a batch are resolved against the batch file's
             // directory, so a committed time-series case works from any CWD.
             std::string batch_dir;
-            size_t slash = batch_file.find_last_of('/');
+            size_t slash = batch_file.find_last_of("/\\");
             if (slash != std::string::npos) batch_dir = batch_file.substr(0, slash + 1);
+
             std::string line;
             int lineno = 0;
             while (std::getline(f, line)) {
                 ++lineno;
-                size_t c = line.find('#');
-                if (c != std::string::npos) line = line.substr(0, c);
-                std::stringstream ss(line);
-                std::string first;
-                if (!(ss >> first)) continue;   // blank / comment-only line
+
+                // Split into tokens, stopping at a token that STARTS with '#'.
+                // Cutting the line at the first '#' anywhere would truncate a
+                // legitimate path such as "run#3/field.txt".
+                std::vector<std::string> tok;
+                {
+                    std::istringstream ss(line);
+                    std::string t;
+                    while (ss >> t) { if (t[0] == '#') break; tok.push_back(t); }
+                }
+                if (tok.empty()) continue;   // blank / comment-only line
+
+                auto err = [&](const std::string& what) {
+                    throw std::runtime_error("batch line " + std::to_string(lineno) + ": " + what);
+                };
 
                 // A line is either a direction vector "<nx> <ny> <nz> ..." or an
                 // angle "a <az> <el> ..." (degrees). Detect by the first token.
                 double nx, ny, nz;
-                if (first == "a" || first == "A" || first == "angle") {
-                    double az, el;
-                    if (!(ss >> az >> el))
-                        throw std::runtime_error("batch line " + std::to_string(lineno) + ": angle view expects 'a <azimuth> <elevation> ...'");
+                size_t ti;
+                if (tok[0] == "a" || tok[0] == "A" || tok[0] == "angle") {
+                    if (tok.size() < 3) err("angle view expects 'a <azimuth> <elevation> ...'");
+                    double az = parse_double(tok[1], "batch azimuth");
+                    double el = parse_double(tok[2], "batch elevation");
+                    if (!std::isfinite(az) || !std::isfinite(el)) err("azimuth and elevation must be finite");
                     Vec3<double> d = angle_to_dir(az, el);
                     nx = d.x; ny = d.y; nz = d.z;
+                    ti = 3;
                 } else {
-                    char* endp; nx = std::strtod(first.c_str(), &endp);
-                    if (*endp != '\0' || !(ss >> ny >> nz))
-                        throw std::runtime_error("batch line " + std::to_string(lineno) + ": expected '<nx> <ny> <nz> ...' or 'a <az> <el> ...'");
-                    if (nx==0 && ny==0 && nz==0)
-                        throw std::runtime_error("batch line " + std::to_string(lineno) + ": zero view vector");
+                    if (tok.size() < 3) err("expected '<nx> <ny> <nz> ...' or 'a <az> <el> ...'");
+                    nx = parse_double(tok[0], "batch nx");
+                    ny = parse_double(tok[1], "batch ny");
+                    nz = parse_double(tok[2], "batch nz");
+                    if (nx == 0 && ny == 0 && nz == 0) err("zero view vector");
+                    if (!std::isfinite(nx) || !std::isfinite(ny) || !std::isfinite(nz))
+                        err("view direction must be finite");
+                    ti = 3;
                 }
 
                 BatchEntry be = {nx, ny, nz, -1.0, ""};
-                auto resolve = [&](const std::string& p) {
-                    return (!p.empty() && p[0] == '/') ? p : batch_dir + p;
-                };
-                // The optional trailing tokens are [resolution] and/or [data_file],
-                // in that order. We sniff each token: a pure number is a resolution,
-                // anything else is a data-file path. This lets a view attach data
-                // without having to restate the default resolution.
-                std::string tok;
-                if (ss >> tok) {
-                    char* endp; double rv = std::strtod(tok.c_str(), &endp);
-                    if (*endp == '\0') { // pure number -> resolution
-                        if (rv <= 0) throw std::runtime_error("batch line " + std::to_string(lineno) + ": resolution must be positive");
-                        be.resolution = rv;
-                        std::string d_temp;
-                        if (ss >> d_temp) be.data_file = resolve(d_temp);
-                    } else {             // non-numeric -> data file, default resolution
-                        be.data_file = resolve(tok);
+
+                // The optional trailing tokens are [resolution] and [data[@col]],
+                // in EITHER order, as the help text and README have always said.
+                //
+                // The filesystem gets the first vote: a token naming a readable
+                // file is data. Deciding on "looks like a number" first meant a
+                // time-series file named for its timestep ("0100", "2024") was
+                // silently read as a resolution and the field never loaded at
+                // all — a wrong answer with a zero exit status. Ambiguity is
+                // unavoidable here, so it resolves toward the loud failure.
+                for (; ti < tok.size(); ++ti) {
+                    const std::string resolved = resolve_batch_path(batch_dir, tok[ti]);
+                    if (names_data_file(resolved)) {
+                        if (!be.data_file.empty()) err("more than one data file given");
+                        be.data_file = resolved;
+                        continue;
                     }
+                    char* endp = nullptr;
+                    const char* cstr = tok[ti].c_str();
+                    const double rv = std::strtod(cstr, &endp);
+                    if (endp != cstr && *endp == '\0') {
+                        if (!std::isfinite(rv) || rv <= 0)
+                            err("resolution must be a positive, finite number, got '" + tok[ti] + "'");
+                        if (be.resolution > 0) err("more than one resolution given");
+                        be.resolution = rv;
+                        continue;
+                    }
+                    // Neither an existing file nor a number. Treat it as a data
+                    // path so the failure names the missing file, unless we
+                    // already have one, in which case it is simply surplus.
+                    if (!be.data_file.empty()) err("unexpected extra token '" + tok[ti] + "'");
+                    be.data_file = resolved;
                 }
                 batch.push_back(be);
             }
         }
-
         if (batch.empty()) throw std::runtime_error("no views specified (use -v or -b)");
 
         unsigned hw = std::thread::hardware_concurrency();
         if (threads == 0) threads = hw ? hw : 1;
-
-        if (!json) std::cerr << "Running " << batch.size() << " view(s) with " << prec
-                             << " precision on " << threads << " thread(s)...\n";
 
         if (prec == "float") run_app<float>(obj_file, data_file, out_pre, batch, res, cull, json, threads, forced_mode);
         else                 run_app<double>(obj_file, data_file, out_pre, batch, res, cull, json, threads, forced_mode);

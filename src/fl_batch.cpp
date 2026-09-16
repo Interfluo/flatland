@@ -11,15 +11,18 @@
 #include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 #include <cstddef>
+#include <cstdio>
 
 namespace flatland {
 
@@ -39,6 +42,20 @@ std::string jnum(T v) {
     std::ostringstream o; o << std::setprecision(10) << (double)v; return o.str();
 }
 
+namespace {
+
+// Rough in-memory size of a loaded matrix, for the cache budget below.
+template <typename T>
+size_t matrix_bytes(const FieldMatrix<T>& m) { return m.data.size() * sizeof(T) + sizeof(m); }
+
+// Keep at most this much field data resident. A batch that names one file per
+// timestep would otherwise grow the cache without limit — roughly 16 MB per
+// distinct file on a 10k-vertex mesh with 400 columns, which a long series will
+// turn into an out-of-memory kill.
+const size_t CACHE_BUDGET_BYTES = 256u << 20;   // 256 MB
+
+} // namespace
+
 /* ----------------------
    Application Runner
    ---------------------- */
@@ -49,22 +66,72 @@ void run_app(const std::string& obj, const std::string& default_data, const std:
 
     Mesh<T> mesh = load_mesh<T>(obj);
 
-    // Each distinct field file is loaded ONCE into a shared, read-only cache; workers
-    // then extract their timestep's column from it concurrently. This keeps the
-    // common time-series case (one matrix file shared by every view) from being
-    // re-parsed per thread, while distinct per-view files are still each loaded once.
-    std::map<std::string, std::shared_ptr<FieldMatrix<T>>> mat_cache;
-    std::mutex cache_mtx;
-    auto get_matrix = [&](const std::string& path) -> std::shared_ptr<FieldMatrix<T>> {
-        std::lock_guard<std::mutex> lk(cache_mtx);
-        auto it = mat_cache.find(path);
-        if (it == mat_cache.end()) {
-            auto m = std::make_shared<FieldMatrix<T>>();
-            load_matrix_into(path, mesh, *m, forced_mode);
-            it = mat_cache.emplace(path, m).first;
-        }
-        return it->second;
+    // Field-matrix cache.
+    //
+    // Each distinct file is parsed exactly once and shared read-only; workers then
+    // extract their own timestep's column from it concurrently. Loading happens
+    // OUTSIDE the map lock, via a per-entry std::call_once, so two workers wanting
+    // two different files do not serialize behind each other — only two workers
+    // wanting the SAME file wait, which is the point. A load that fails is
+    // remembered, so a bad path is not re-parsed by every worker in turn.
+    //
+    // The cache is bounded. When it exceeds its budget, entries no one is
+    // currently holding are dropped; anything in use is kept, so eviction can
+    // never pull a matrix out from under a worker.
+    struct CacheSlot {
+        std::once_flag once;
+        std::shared_ptr<FieldMatrix<T>> mat;
+        std::string error;
+        size_t bytes = 0;
     };
+    std::map<std::string, std::shared_ptr<CacheSlot>> mat_cache;
+    std::mutex cache_mtx;
+
+    auto get_matrix = [&](const std::string& path) -> std::shared_ptr<FieldMatrix<T>> {
+        std::shared_ptr<CacheSlot> slot;
+        {
+            std::lock_guard<std::mutex> lk(cache_mtx);
+            auto& s = mat_cache[path];
+            if (!s) s = std::make_shared<CacheSlot>();
+            slot = s;
+        }
+        std::call_once(slot->once, [&]() {
+            try {
+                auto m = std::make_shared<FieldMatrix<T>>();
+                load_matrix_into(path, mesh, *m, forced_mode);
+                slot->mat = std::move(m);
+            } catch (const std::exception& e) {
+                slot->error = e.what();     // memoized: do not re-parse a bad file
+            }
+        });
+        if (!slot->mat)
+            throw std::runtime_error(slot->error.empty()
+                                     ? "cannot load data file '" + path + "'" : slot->error);
+
+        {
+            std::lock_guard<std::mutex> lk(cache_mtx);
+            // `bytes` is accounted here rather than inside call_once: the
+            // eviction scan below reads every slot's size while holding this
+            // lock, so writing it unlocked from a loading thread is a race.
+            // call_once already established the happens-before for slot->mat.
+            if (slot->bytes == 0) slot->bytes = matrix_bytes(*slot->mat);
+            size_t total = 0;
+            for (const auto& kv : mat_cache) total += kv.second->bytes;
+            for (auto it = mat_cache.begin(); it != mat_cache.end() && total > CACHE_BUDGET_BYTES; ) {
+                // use_count()==1 means only the map holds this slot, so no worker
+                // is reading it and dropping it is safe. A slot evicted while its
+                // file is still needed simply reloads on the next request.
+                if (it->second != slot && it->second.use_count() == 1) {
+                    total -= std::min(total, it->second->bytes);
+                    it = mat_cache.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+        return slot->mat;
+    };
+
     // Pre-warm + validate the default field up front so a bad -d fails fast.
     if (!default_data.empty()) get_matrix(parse_field_token(default_data).path);
 
@@ -76,10 +143,17 @@ void run_app(const std::string& obj, const std::string& default_data, const std:
     std::atomic<size_t> next{0};
     std::mutex err_mtx;
     std::string err_msg;
+    size_t err_k = std::numeric_limits<size_t>::max();
 
-    // Worker: pull timestep indices off a shared counter. Each owns a renderer and a
-    // reusable field buffer, so per-timestep field files load on demand -> peak memory
-    // is O(threads), not O(timesteps). The shared fixed field is never reloaded.
+    // Images are written as they are produced, so peak memory stays O(threads)
+    // rather than O(timesteps). If the batch then fails we remove what was
+    // written, rather than leaving a partial series on disk for a run that
+    // reported nothing.
+    std::mutex img_mtx;
+    std::vector<std::string> written_images;
+
+    // Worker: pull timestep indices off a shared counter. Each owns a renderer and
+    // a reusable field buffer.
     auto worker = [&]() {
         Renderer<T> renderer;
         Field<T> local;            // column extracted for the current view
@@ -99,30 +173,60 @@ void run_app(const std::string& obj, const std::string& default_data, const std:
 
                 ViewResult<T> r = process_view<T>({(T)b.nx, (T)b.ny, (T)b.nz}, mesh, fp,
                                                   view_res[k], cull, renderer);
-                if (!out_pre.empty()) {
+
+                // A view that covered nothing has no raster to write. Writing one
+                // anyway would emit the previous view's image, or a malformed 0x0
+                // file; the JSON reports image: null instead.
+                if (!out_pre.empty() && r.image_width > 0 && r.image_height > 0) {
                     std::ostringstream oss; oss << out_pre << "_" << std::setw(4) << std::setfill('0') << k << ".ppm";
                     r.output_image = oss.str();
-                    save_ppm(renderer, r.output_image, r.min_val, r.max_val, r.has_field);
+                    save_ppm(renderer, r.output_image, r.min_val, r.max_val, r.has_stats);
+                    std::lock_guard<std::mutex> lk(img_mtx);
+                    written_images.push_back(r.output_image);
                 }
                 results[k] = std::move(r);
             } catch (const std::exception& e) {
                 std::lock_guard<std::mutex> lk(err_mtx);
-                if (err_msg.empty()) err_msg = "timestep " + std::to_string(k) + ": " + e.what();
+                // Keep the LOWEST-indexed failure, not whichever thread arrived
+                // first, so the same input always produces the same message.
+                if (k < err_k) {
+                    err_k = k;
+                    err_msg = "timestep " + std::to_string(k) + ": " + e.what();
+                }
                 next.store(batch.size());   // signal other workers to stop
                 return;
             }
         }
     };
 
-    unsigned n_workers = std::max(1u, std::min<unsigned>(threads, (unsigned)batch.size()));
+    const unsigned n_workers = std::max(1u, std::min<unsigned>(threads, (unsigned)batch.size()));
+    if (!json)
+        std::cerr << "Running " << batch.size() << " view(s) with "
+                  << (sizeof(T)==4 ? "float" : "double") << " precision on "
+                  << n_workers << " thread(s)...\n";
+
     if (n_workers <= 1) {
         worker();
     } else {
         std::vector<std::thread> pool;
-        for (unsigned t=0; t<n_workers; ++t) pool.emplace_back(worker);
+        pool.reserve(n_workers);
+        try {
+            for (unsigned t=0; t<n_workers; ++t) pool.emplace_back(worker);
+        } catch (const std::system_error&) {
+            // The OS refused a thread. Join what did start rather than unwinding
+            // through a vector of joinable threads, which calls std::terminate.
+            next.store(batch.size());
+            for (auto& th : pool) if (th.joinable()) th.join();
+            throw std::runtime_error("could not start " + std::to_string(n_workers) +
+                                     " worker threads; try a smaller -t/--threads");
+        }
         for (auto& th : pool) th.join();
     }
-    if (!err_msg.empty()) throw std::runtime_error(err_msg);
+
+    if (!err_msg.empty()) {
+        for (const auto& p : written_images) std::remove(p.c_str());
+        throw std::runtime_error(err_msg);
+    }
 
     // Emit results in view order (after compute, so threaded output stays ordered).
     if (json) {
@@ -144,7 +248,10 @@ void run_app(const std::string& obj, const std::string& default_data, const std:
                       << "      \"pixels\": " << r.covered_pixels << ",\n"
                       << "      \"width\": " << r.image_width << ",\n"
                       << "      \"height\": " << r.image_height << ",\n";
-            if (r.has_field) {
+            // has_stats, not has_field: a view carrying a field but covering no
+            // pixels has no statistics, and emitting 0 would be a fabrication a
+            // consumer could not distinguish from a measurement.
+            if (r.has_stats) {
                 std::cout << "      \"average\": " << jnum(r.average_value) << ",\n"
                           << "      \"integral\": " << jnum(r.integral) << ",\n"
                           << "      \"min\": " << jnum(r.min_val) << ",\n"
@@ -160,7 +267,7 @@ void run_app(const std::string& obj, const std::string& default_data, const std:
                       << "    }" << (k==batch.size()-1?"":",") << "\n";
         } else {
             std::cout << "View " << k << " | Area: " << r.area;
-            if (r.has_field)
+            if (r.has_stats)
                 std::cout << " | Avg: " << r.average_value << " | Integral: " << r.integral;
             std::cout << " | Pixels: " << r.covered_pixels
                       << " | Time: " << r.time_seconds << "s\n";

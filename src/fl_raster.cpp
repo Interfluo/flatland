@@ -37,34 +37,47 @@ void rasterize(const TriProjected<T>& tri, Renderer<T>& r, T xmin, T ymin, T pix
     int iy_min = std::max(0, static_cast<int>((min_y - ymin)/pix_sz));
     int iy_max = std::min(r.Ny - 1, static_cast<int>((max_y - ymin)/pix_sz));
 
-    Vec2<T> p_start = { xmin + (ix_min + (T)0.5)*pix_sz, ymin + (iy_min + (T)0.5)*pix_sz };
+    const T px0 = xmin + (ix_min + (T)0.5)*pix_sz;
 
-    // Edge function values at the first sampled pixel center
-    T w0_row = edge_eval(tri.v1, tri.v2, p_start);
-    T w1_row = edge_eval(tri.v2, tri.v0, p_start);
-    T w2_row = edge_eval(tri.v0, tri.v1, p_start);
+    // Per-pixel increments along a row.
+    const T A0 = (tri.v2.y - tri.v1.y)*pix_sz;
+    const T A1 = (tri.v0.y - tri.v2.y)*pix_sz;
+    const T A2 = (tri.v1.y - tri.v0.y)*pix_sz;
 
-    // Per-pixel increments
-    T A0 = (tri.v2.y - tri.v1.y)*pix_sz, B0 = (tri.v1.x - tri.v2.x)*pix_sz;
-    T A1 = (tri.v0.y - tri.v2.y)*pix_sz, B1 = (tri.v2.x - tri.v0.x)*pix_sz;
-    T A2 = (tri.v1.y - tri.v0.y)*pix_sz, B2 = (tri.v0.x - tri.v1.x)*pix_sz;
+    // Interpolate RELATIVE to vertex 0 rather than as a weighted sum of all
+    // three vertices. The two are equivalent in exact arithmetic because
+    // w0+w1+w2 == area2, but the edge functions are stepped incrementally while
+    // inv_area is fixed, so in float that identity drifts and the weights stop
+    // summing to one. Expressed this way the drift multiplies the DIFFERENCES
+    // between vertex values, so a constant field interpolates to exactly that
+    // constant and the error on a varying field scales with its range rather
+    // than its magnitude. Previously a constant field of 1e7 came back spanning
+    // 9999999 to 10000733.
+    const T dz1 = tri.z1 - tri.z0, dz2 = tri.z2 - tri.z0;
+    const T dv1 = tri.val1 - tri.val0, dv2 = tri.val2 - tri.val0;
 
     for (int iy = iy_min; iy <= iy_max; ++iy) {
-        T w0=w0_row, w1=w1_row, w2=w2_row;
+        // Recompute each row's starting edge values exactly instead of carrying
+        // an accumulator down the rows: the error in a running sum grows with
+        // the raster height, which is precisely when accuracy matters most.
+        const Vec2<T> p_row = { px0, ymin + (iy + (T)0.5)*pix_sz };
+        T w0 = edge_eval(tri.v1, tri.v2, p_row);
+        T w1 = edge_eval(tri.v2, tri.v0, p_row);
+        T w2 = edge_eval(tri.v0, tri.v1, p_row);
+
         size_t idx = (size_t)iy * r.Nx + ix_min;
         for (int ix = ix_min; ix <= ix_max; ++ix) {
             if (w0 >= 0 && w1 >= 0 && w2 >= 0) {
-                T z = (w0*tri.inv_area)*tri.z0 + (w1*tri.inv_area)*tri.z1 + (w2*tri.inv_area)*tri.z2;
+                const T z = tri.z0 + (w1*dz1 + w2*dz2)*tri.inv_area;
                 if (z < r.zbuffer[idx]) {
                     r.zbuffer[idx] = z;
                     r.mask[idx] = 1;
                     if (use_vals)
-                        r.val_buffer[idx] = (w0*tri.val0 + w1*tri.val1 + w2*tri.val2)*tri.inv_area;
+                        r.val_buffer[idx] = tri.val0 + (w1*dv1 + w2*dv2)*tri.inv_area;
                 }
             }
             w0+=A0; w1+=A1; w2+=A2; idx++;
         }
-        w0_row+=B0; w1_row+=B1; w2_row+=B2;
     }
 }
 

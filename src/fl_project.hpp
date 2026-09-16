@@ -12,6 +12,10 @@ namespace flatland {
 template <typename T>
 struct ViewResult {
     bool has_field = false;
+    // True only when a field was supplied AND at least one pixel was covered.
+    // When false the four statistics below are not measurements and must not be
+    // reported as such; callers emit null rather than a fabricated zero.
+    bool has_stats = false;
     T area = 0;
     T average_value = 0;
     T integral = 0;     // Σ value · pixel_area  (the area integral of the field)
