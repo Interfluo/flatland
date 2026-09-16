@@ -198,6 +198,31 @@ void store_blocks(BitWriter& bw, const uint8_t* data, size_t size, std::vector<u
     } while (pos < size);
 }
 
+/* The CRC-32 table (IEEE 802.3 polynomial, reflected: 0xEDB88320).
+ *
+ * Built at compile time. It began life as a function-local `static uint32_t
+ * table[256]` behind a `static bool ready` flag, which is a data race: every
+ * worker writing a PNG raced to fill the same table and set the same flag.
+ * Each thread wrote identical bytes, so it never produced a wrong checksum in
+ * practice, but it is undefined behaviour and ThreadSanitizer rightly failed
+ * on it -- intermittently, which is worse than failing every time.
+ *
+ * constexpr removes the problem rather than synchronising it: there is no
+ * initialisation left to race over, and no atomic to check on each call. */
+struct Crc32Table { uint32_t v[256]; };
+
+constexpr Crc32Table make_crc32_table() {
+    Crc32Table t{};
+    for (uint32_t i = 0; i < 256; ++i) {
+        uint32_t c = i;
+        for (int k = 0; k < 8; ++k) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+        t.v[i] = c;
+    }
+    return t;
+}
+
+constexpr Crc32Table CRC32_TABLE = make_crc32_table();
+
 } // namespace
 
 /* ------------------------------------------------------------------------ */
@@ -205,18 +230,8 @@ void store_blocks(BitWriter& bw, const uint8_t* data, size_t size, std::vector<u
 /* ------------------------------------------------------------------------ */
 
 uint32_t crc32_bytes(const uint8_t* data, size_t size, uint32_t seed) {
-    static uint32_t table[256];
-    static bool ready = false;
-    if (!ready) {
-        for (uint32_t i = 0; i < 256; ++i) {
-            uint32_t c = i;
-            for (int k = 0; k < 8; ++k) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-            table[i] = c;
-        }
-        ready = true;
-    }
     uint32_t c = seed ^ 0xFFFFFFFFu;
-    for (size_t i = 0; i < size; ++i) c = table[(c ^ data[i]) & 0xFF] ^ (c >> 8);
+    for (size_t i = 0; i < size; ++i) c = CRC32_TABLE.v[(c ^ data[i]) & 0xFF] ^ (c >> 8);
     return c ^ 0xFFFFFFFFu;
 }
 
