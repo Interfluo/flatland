@@ -12,15 +12,30 @@
 CXX      ?= c++
 CXXFLAGS ?= -std=c++17 -O2 -Wall
 LDFLAGS  ?= -pthread
-SRC       = src/main.cpp
+INCLUDES  = -Isrc
+SRC       = src/fl_mesh.cpp \
+            src/fl_io.cpp \
+            src/fl_field.cpp \
+            src/fl_raster.cpp \
+            src/fl_project.cpp \
+            src/fl_image.cpp \
+            src/fl_batch.cpp \
+            cli/main.cpp
+OBJ       = $(SRC:.cpp=.o)
+DEP       = $(OBJ:.o=.d)
 BIN       = flatland
 
-$(BIN): $(SRC)
-	$(CXX) $(CXXFLAGS) $(SRC) -o $(BIN) $(LDFLAGS)
+$(BIN): $(OBJ)
+	$(CXX) $(CXXFLAGS) $(OBJ) -o $(BIN) $(LDFLAGS)
+
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
+
+-include $(DEP)
 
 .PHONY: test clean
 test: $(BIN)
 	./tests/run_tests.sh ./$(BIN)
 
 clean:
-	rm -f $(BIN)
+	rm -f $(BIN) $(OBJ) $(DEP)

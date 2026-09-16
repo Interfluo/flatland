@@ -39,7 +39,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Configure & build with CMake
         run: |
-          cmake -S src -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build --config Release
       - name: Run test suite against CMake binary
         run: ./tests/run_tests.sh ./build/flatland

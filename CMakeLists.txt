@@ -13,10 +13,22 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-add_executable(flatland main.cpp)
+# Library half: everything except the command-line front end.
+add_library(flatland_core STATIC
+    src/fl_mesh.cpp
+    src/fl_io.cpp
+    src/fl_field.cpp
+    src/fl_raster.cpp
+    src/fl_project.cpp
+    src/fl_image.cpp
+    src/fl_batch.cpp)
+target_include_directories(flatland_core PUBLIC src)
+
+add_executable(flatland cli/main.cpp)
+target_link_libraries(flatland PRIVATE flatland_core)
 
 # std::thread needs the platform threading library (e.g. -pthread on glibc).
 find_package(Threads REQUIRED)
-target_link_libraries(flatland PRIVATE Threads::Threads)
+target_link_libraries(flatland_core PUBLIC Threads::Threads)
 
 install(TARGETS flatland DESTINATION bin)

@@ -3,6 +3,7 @@
 src/build/
 /flatland
 *.o
+*.d
 *.ppm
 
 # OS cruft
