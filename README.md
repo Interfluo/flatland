@@ -191,3 +191,19 @@ CI builds with GCC and Clang (Linux + macOS) and via CMake on every push — see
    to leave cores free.
 4. **Culling** — `--no-cull` is for non-manifold or open surfaces where "inside" faces
    should still contribute to the silhouette.
+
+## Licensing
+
+FlatLand is dual-licensed.
+
+- **[GNU AGPL v3](LICENSE)** — free for any use, including commercial use,
+  provided anything you build on it is also released under the AGPL. Using
+  FlatLand internally, on your own parts, in your own pipeline, is free and
+  carries no obligations: the AGPL attaches to distribution and to
+  network-accessible services, not to in-house use.
+- **[Commercial license](COMMERCIAL-LICENSE.md)** — required to ship FlatLand
+  inside a closed-source product, or to offer it as a hosted service, without
+  releasing your own source. Terms are negotiated per engagement.
+
+Releases up to and including `v2` were published under the GNU GPL v3 and remain
+available under it; the AGPL applies from the relicensing commit onward.
