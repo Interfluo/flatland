@@ -30,6 +30,11 @@ changing view direction *and* a changing field over a fixed mesh, in seconds.
 | **Command line** | `./flatland mesh.obj -v 1 0 0` |
 | **Anything else** | The C ABI is consumable from Julia, R, C#, Go, Rust — anything that speaks C |
 
+Five worked examples, written twice so the two bindings are directly comparable:
+projected area and orientation sweeps, geometry straight from memory, field
+integrals, a parallel time series, and getting at the raster — see
+**[examples/README.md](examples/README.md)**.
+
 The library takes **arrays**, not just files. You do not have to write a mesh to
 disk and shell out to use it.
 
@@ -205,6 +210,10 @@ extract their timestep's column concurrently.
 `examples/with_fields/generate_field.py` builds an orbiting-view, evolving-field
 case using only the Python standard library. A ready-to-run demo is committed at
 `examples/with_fields/timeseries_demo/`.
+
+For the library rather than the CLI, [examples/README.md](examples/README.md)
+indexes five worked examples in Python and MATLAB, each answering a question
+rather than touring the API.
 
 ## Validation
 

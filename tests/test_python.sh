@@ -158,3 +158,46 @@ expect_ok $? "python/example.py runs end to end"
 grep -qi "area" "$P/example.out" \
     && ok "...and reports a projected area" \
     || bad "...and reports a projected area ($(tail -2 "$P/example.out" | tr '\n' ' '))"
+
+# --- the worked examples ----------------------------------------------------
+# Examples that stop working are worse than no examples, because they are the
+# first thing a new user runs. All five are executed here; each prints a
+# closed-form comparison, so a wrong answer shows up as a bad number rather
+# than only as a crash.
+sect "Worked examples (examples/python)"
+
+EX="$P/examples"; mkdir -p "$EX"
+for script in "$ROOT"/examples/python/ex0*.py; do
+    name=$(basename "$script")
+    ( cd "$EX" && PYTHONPATH="$BASE_PYPATH" "$PY_BIN" "$script" "$EX" ) \
+        >"$EX/$name.out" 2>&1
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        ok "$name runs"
+    else
+        bad "$name exited $rc"
+        tail -4 "$EX/$name.out" | sed 's/^/      /'
+    fi
+done
+
+# ex01 states the cube's exact projected areas; the worst relative error it
+# reports must stay small, or the example is quietly teaching a wrong number.
+WORST=$(grep -oE 'worst relative error: [0-9.e+-]+' "$EX/ex01_projected_area.py.out" \
+        | awk '{print $4}')
+if [ -n "$WORST" ]; then
+    awk -v w="$WORST" 'BEGIN{exit !(w < 1e-3)}' \
+        && ok "ex01 agrees with the closed form (worst $WORST)" \
+        || bad "ex01 worst relative error is $WORST"
+else
+    bad "ex01 did not report a worst relative error"
+fi
+
+# ex05 recomputes the area integral from the raster by hand; it must match what
+# FlatLand reported, since that is the definition of the quantity.
+grep -q "agree to 1e-9       : True" "$EX/ex05_heatmap.py.out" \
+    && ok "ex05 reproduces the integral from the raster" \
+    || bad "ex05 could not reproduce the integral from the raster"
+
+# ...and it must actually have written the images it claims to.
+[ -s "$EX/sphere_heatmap.ppm" ] && ok "ex05 wrote a PPM" || bad "ex05 wrote no PPM"
+[ -s "$EX/sphere_heatmap.png" ] && ok "ex05 wrote a PNG" || bad "ex05 wrote no PNG"

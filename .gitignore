@@ -11,5 +11,9 @@ src/build/
 *.d
 *.ppm
 
+# Python
+__pycache__/
+*.py[cod]
+
 # OS cruft
 .DS_Store
