@@ -1,0 +1,236 @@
+name: Release
+
+# Cutting a release is `git tag vX.Y.Z && git push --tags`. Everything below
+# then builds, tests and attaches the binaries.
+#
+# workflow_dispatch builds and uploads the same archives as workflow artifacts
+# WITHOUT creating or touching a GitHub Release, so the packaging can be
+# rehearsed on a branch.
+#
+# Releases are GitHub-only by decision: there is deliberately no package-index
+# publishing step here.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+          # A native arm64 runner rather than a cross-compile, so the suite runs
+          # on the architecture the archive is for instead of under emulation or
+          # not at all. This label is available to public repositories and to
+          # Team/Enterprise plans; a repository without it should switch this
+          # entry to a cross-build (g++-aarch64-linux-gnu) and say plainly in the
+          # release notes that the aarch64 archive is untested.
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+          - platform: macos-arm64
+            runner: macos-latest
+            deployment_target: "11.0"
+          - platform: macos-x86_64
+            runner: macos-13
+            deployment_target: "10.15"
+          - platform: windows-x86_64
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Work out the version string
+        id: ver
+        shell: bash
+        run: |
+          set -eu
+          ref="${GITHUB_REF_NAME:-}"
+          case "${GITHUB_REF:-}" in
+              refs/tags/v*) version="${ref#v}" ;;
+              *)            version="0.0.0+${GITHUB_SHA:0:8}" ;;   # dispatch build
+          esac
+          echo "version=$version"                                   >> "$GITHUB_OUTPUT"
+          echo "stem=flatland-$version-${{ matrix.platform }}"       >> "$GITHUB_OUTPUT"
+
+      # -----------------------------------------------------------------------
+      # Build
+      # -----------------------------------------------------------------------
+      - name: Configure & build (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -eu
+          args=(-S . -B build -DCMAKE_BUILD_TYPE=Release)
+
+          if [ "${{ runner.os }}" = "Linux" ]; then
+              # FlatLand is meant to drop onto minimal and airgapped systems, so
+              # the CLI must not need a libstdc++ newer than whatever is already
+              # there. EXE_LINKER_FLAGS deliberately does not touch the shared
+              # library: a .so with its own private copy of libstdc++ conflicts
+              # with the one its host process has already loaded.
+              args+=(-DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc")
+          fi
+          if [ -n "${{ matrix.deployment_target }}" ]; then
+              args+=(-DCMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.deployment_target }})
+          fi
+
+          cmake "${args[@]}"
+          cmake --build build --config Release --parallel
+
+      - name: Configure & build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake -S . -B build
+          cmake --build build --config Release --parallel
+
+      # -----------------------------------------------------------------------
+      # Test what is about to be shipped
+      # -----------------------------------------------------------------------
+      - name: Confirm the Linux CLI carries its own C++ runtime
+        if: runner.os == 'Linux'
+        run: |
+          ldd build/flatland || true
+          if ldd build/flatland | grep -qE 'libstdc\+\+|libgcc_s'; then
+              echo "the CLI still links libstdc++/libgcc dynamically"
+              exit 1
+          fi
+
+      - name: Run test suite (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ./tests/run_tests.sh ./build/flatland geometry parsing cli batch capi
+
+      - name: Run test suite (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p "$PWD/.ci-bin"
+          printf '#!/usr/bin/env bash\nexec python "$@"\n' > "$PWD/.ci-bin/python3"
+          chmod +x "$PWD/.ci-bin/python3"
+          export PATH="$PWD/.ci-bin:$PATH"
+          # Fixtures are written by a native python and read by a native binary,
+          # so they need a path both understand rather than Git Bash's /tmp.
+          export TMPDIR="$(cygpath -m "$RUNNER_TEMP")"
+          BIN=build/Release/flatland.exe
+          [ -x "$BIN" ] || BIN=build/flatland.exe
+          # 'capi' needs make and a POSIX cc; CI's windows-msvc job covers the
+          # C ABI on Windows natively.
+          ./tests/run_tests.sh "$BIN" geometry parsing cli batch
+
+      # -----------------------------------------------------------------------
+      # Stage and archive
+      # -----------------------------------------------------------------------
+      - name: Stage the archive contents
+        shell: bash
+        run: |
+          set -eu
+          stem='${{ steps.ver.outputs.stem }}'
+          cmake --install build --config Release --prefix "dist/$stem"
+          cp README.md LICENSE "dist/$stem/"
+          echo "--- staged ---"
+          find "dist/$stem" \( -type f -o -type l \) | sort
+
+          # The archive has to contain the CLI, the shared library, the static
+          # library and the header, so fail loudly here rather than shipping a
+          # half-empty tarball.
+          need_cli=$(find "dist/$stem/bin" -name 'flatland' -o -name 'flatland.exe' | head -1)
+          need_hdr="dist/$stem/include/flatland.h"
+          shared=$(find "dist/$stem" -name '*.so*' -o -name '*.dylib' -o -name '*.dll' | head -1)
+          static=$(find "dist/$stem" -name 'libflatland.a' -o -name 'flatland_static.lib' | head -1)
+          for label in "cli:$need_cli" "header:$need_hdr" "shared:$shared" "static:$static"; do
+              path="${label#*:}"
+              [ -n "$path" ] && [ -e "$path" ] || { echo "missing ${label%%:*}"; exit 1; }
+          done
+
+      - name: Create .tar.gz (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -eu
+          stem='${{ steps.ver.outputs.stem }}'
+          # COPYFILE_DISABLE keeps macOS from adding ._ AppleDouble members.
+          COPYFILE_DISABLE=1 tar -czf "$stem.tar.gz" -C dist "$stem"
+          tar -tzf "$stem.tar.gz"
+
+      - name: Create .zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $stem = '${{ steps.ver.outputs.stem }}'
+          Compress-Archive -Path "dist/$stem" -DestinationPath "$stem.zip"
+          Expand-Archive -Path "$stem.zip" -DestinationPath "verify" -Force
+          Get-ChildItem -Recurse verify | Select-Object -ExpandProperty FullName
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ver.outputs.stem }}
+          path: |
+            ${{ steps.ver.outputs.stem }}.tar.gz
+            ${{ steps.ver.outputs.stem }}.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Collect every platform's archive, checksum the set, attach it to the tag's
+  # Release. Skipped for workflow_dispatch: the artifacts above are the output
+  # of a rehearsal, and a rehearsal must not publish anything.
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksum every archive
+        run: |
+          set -eu
+          cd artifacts
+          ls -l
+          # Sorted, and over bare file names, so the file reads the same however
+          # the artifacts happened to arrive.
+          sha256sum $(ls *.tar.gz *.zip | sort) > SHA256SUMS
+          cat SHA256SUMS
+          sha256sum -c SHA256SUMS
+
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.zip
+            artifacts/SHA256SUMS
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            Each archive contains the `flatland` CLI, the shared library, the
+            static library, `include/flatland.h`, `README.md` and `LICENSE`.
+
+            Verify a download against `SHA256SUMS`:
+
+                sha256sum -c SHA256SUMS --ignore-missing
+
+            The Linux CLI is linked with `-static-libstdc++ -static-libgcc`, so
+            it runs on distributions older than the one it was built on. The
+            shared library is not: it links the system C++ runtime, as a library
+            loaded into someone else's process must.
+
+            On Windows the static library is `flatland_static.lib`, and
+            `flatland.lib` is the import library for `flatland.dll`. Consumers
+            linking the static library must define `FLATLAND_STATIC` before
+            including `flatland.h`.

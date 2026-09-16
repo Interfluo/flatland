@@ -5,9 +5,20 @@ on:
     branches: ["**"]
   pull_request:
 
+# Nothing here needs a token; the release workflow is where writes happen.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build-and-test:
-    name: Build & test (${{ matrix.os }} / ${{ matrix.cxx }})
+  # ---------------------------------------------------------------------------
+  # The dependency-free path: one make invocation, then the whole suite.
+  # ---------------------------------------------------------------------------
+  make:
+    name: make (${{ matrix.os }} / ${{ matrix.cxx }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -21,25 +32,293 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build (dependency-free, single recipe)
-        run: make CXX=${{ matrix.cxx }}
+      - name: Build CLI, static library and shared library
+        run: make CXX=${{ matrix.cxx }} all
 
       - name: Run test suite
         run: ./tests/run_tests.sh ./flatland
+        env:
+          CXX: ${{ matrix.cxx }}
 
       - name: Smoke-test the committed time-series example
         run: |
           ./flatland examples/sphere_areas/sphere_coarse.obj \
             -b examples/with_fields/timeseries_demo/timeseries.txt -j > /dev/null
 
-  cmake-build:
-    name: CMake build (Ubuntu)
+  # ---------------------------------------------------------------------------
+  # The same sources through CMake, which is what packagers and the release
+  # workflow use.
+  # ---------------------------------------------------------------------------
+  cmake:
+    name: cmake (${{ matrix.os }} / ${{ matrix.cxx }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        cxx: [g++, clang++]
+        exclude:
+          - os: macos-latest
+            cxx: g++
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure & build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+                -DFLATLAND_BUILD_CAPI_TEST=ON
+          cmake --build build --config Release --parallel
+
+      - name: ctest (shell suite + both C ABI link modes)
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Install into a staging prefix
+        run: |
+          cmake --install build --config Release --prefix "$PWD/stage"
+          find stage -type f -o -type l | sort
+
+  # ---------------------------------------------------------------------------
+  # The library on its own: `make lib` from a clean tree must produce both
+  # libraries without the CLI being built first, and the C ABI suite links a
+  # real C consumer against each of them.
+  # ---------------------------------------------------------------------------
+  library:
+    name: library + C ABI
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Configure & build with CMake
+
+      - name: make lib (clean tree, no CLI)
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --config Release
-      - name: Run test suite against CMake binary
-        run: ./tests/run_tests.sh ./build/flatland
+          make clean
+          make lib
+          test -f libflatland.a  || { echo "static library missing";  exit 1; }
+          test -f libflatland.so || { echo "shared library missing";  exit 1; }
+          ls -l libflatland.a libflatland.so
+
+      - name: The shared library exports the C ABI and nothing else
+        run: |
+          nm -D --defined-only libflatland.so | grep ' T fl_' | sort
+          leaked=$(nm -D --defined-only libflatland.so | grep ' T ' | grep -c '_ZN' || true)
+          test "$leaked" -eq 0 || { echo "$leaked C++ symbols leaked"; exit 1; }
+
+      - name: The static library carries no dllexport-equivalent surprises
+        run: |
+          # On ELF this is only a sanity check that capi.o really is in the
+          # archive; the Windows half of the same question is covered by the
+          # MSVC job, which links a C consumer against flatland_static.lib.
+          ar t libflatland.a | grep -q '^capi\.o$'
+
+      - name: C ABI suite
+        run: |
+          make all
+          ./tests/run_tests.sh ./flatland capi
+
+      - name: make install into a staging prefix
+        run: |
+          make install DESTDIR="$PWD/stage" PREFIX=/usr
+          find stage -type f | sort
+
+  # ---------------------------------------------------------------------------
+  # Windows, MSVC, via CMake. This is the job that proves the __declspec
+  # export/import split in flatland.h: capi_static links a C program against
+  # flatland_static.lib (FL_API empty) and capi_shared links one against
+  # flatland.lib + flatland.dll (FL_API dllimport).
+  # ---------------------------------------------------------------------------
+  windows-msvc:
+    name: Windows (MSVC / CMake)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure & build
+        shell: pwsh
+        run: |
+          cmake -S . -B build -DFLATLAND_BUILD_CAPI_TEST=ON
+          cmake --build build --config Release --parallel
+
+      - name: Show what the multi-config generator produced
+        shell: bash
+        run: ls -l build/Release
+
+      - name: C ABI tests (static and shared link)
+        shell: pwsh
+        run: ctest --test-dir build -C Release --output-on-failure -R "^capi_"
+
+      - name: Shell test suite under Git Bash
+        shell: bash
+        run: |
+          set -eu
+          # The suite shells out to python3, which Windows does not provide
+          # under that name (and the WindowsApps python3 is a Store stub).
+          mkdir -p "$PWD/.ci-bin"
+          printf '#!/usr/bin/env bash\nexec python "$@"\n' > "$PWD/.ci-bin/python3"
+          chmod +x "$PWD/.ci-bin/python3"
+          export PATH="$PWD/.ci-bin:$PATH"
+          python3 -c "import sys; print(sys.version)"
+
+          # The fixtures are written by python3 and read by a NATIVE Windows
+          # binary, so the temporary directory has to be a path both understand.
+          # Git Bash's own /tmp is invisible to native python.
+          export TMPDIR="$(cygpath -m "$RUNNER_TEMP")"
+          echo "TMPDIR=$TMPDIR"
+
+          # A multi-config generator puts the binary under the config directory;
+          # a single-config one does not. Accept either.
+          BIN=build/Release/flatland.exe
+          [ -x "$BIN" ] || BIN=build/flatland.exe
+          [ -x "$BIN" ] || { echo "no flatland.exe found under build/"; exit 1; }
+          echo "binary: $BIN"
+
+          # The suites are named explicitly rather than run as "everything".
+          # 'capi' drives make and a POSIX cc and looks for libflatland.so; the
+          # ctest step above covers the same ground with MSVC against both link
+          # modes. Any binding suite (ctypes, MATLAB) is likewise left to
+          # whoever owns those bindings to wire up for Windows.
+          ./tests/run_tests.sh "$BIN" geometry parsing cli batch
+
+      - name: Install into a staging prefix
+        shell: bash
+        run: |
+          cmake --install build --config Release --prefix "$PWD/stage"
+          find stage -type f | sort
+
+  # ---------------------------------------------------------------------------
+  # Windows, MinGW-w64, via the Makefile — the other half of the Windows story.
+  # This is what exercises the Makefile's .dll / import-library / .exe branch.
+  # ---------------------------------------------------------------------------
+  windows-mingw:
+    name: Windows (MinGW / make)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            make
+            python
+            mingw-w64-x86_64-gcc
+
+      - name: Build CLI, static library and DLL
+        run: |
+          make all
+          ls -l flatland.exe libflatland.a flatland.dll libflatland.dll.a
+
+      - name: Run test suite
+        run: |
+          # Suites named explicitly: 'capi' expects libflatland.so and a POSIX
+          # cc, while MinGW builds flatland.dll plus an import library, so the
+          # C ABI is covered by the MSVC job instead.
+          ./tests/run_tests.sh ./flatland.exe geometry parsing cli batch
+
+  # ---------------------------------------------------------------------------
+  # AddressSanitizer + UndefinedBehaviorSanitizer over the CLI and the C ABI
+  # suites, including tests/test_capi.c, which the suite compiles itself with
+  # $CC. Both are clean today, so a finding here is a real regression.
+  # ---------------------------------------------------------------------------
+  sanitizers:
+    name: ASan + UBSan (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build sanitizer compiler wrappers
+        run: |
+          # tests/test_capi.sh invokes "$CC" as a single word, so the flags have
+          # to travel inside the compiler rather than alongside it.
+          #
+          # -fno-sanitize=enum: the C ABI's whole job at the boundary is to
+          # reject values a foreign caller had every right to store in an
+          # fl_options field, so check_options() deliberately reads
+          # options.precision when it holds something outside the enumerators
+          # (tests/test_capi.c passes 42). UBSan flags exactly that read. The
+          # rest of UBSan stays on and halts on error.
+          mkdir -p "$HOME/sanbin"
+          printf '#!/bin/sh\nexec gcc -fsanitize=address,undefined -fno-sanitize=enum -fno-omit-frame-pointer -g "$@"\n' > "$HOME/sanbin/cc-san"
+          printf '#!/bin/sh\nexec g++ -fsanitize=address,undefined -fno-sanitize=enum -fno-omit-frame-pointer -g "$@"\n' > "$HOME/sanbin/cxx-san"
+          chmod +x "$HOME/sanbin/cc-san" "$HOME/sanbin/cxx-san"
+
+      - name: Build instrumented
+        run: |
+          make clean
+          make CXX="$HOME/sanbin/cxx-san" CXXFLAGS="-std=c++17 -O1 -g -Wall" all
+
+      - name: Run the C/C++ suites instrumented
+        env:
+          ASAN_OPTIONS: detect_leaks=1:detect_stack_use_after_return=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          # Named explicitly rather than "everything": a suite that loads
+          # libflatland through a foreign runtime (ctypes, MATLAB) cannot work
+          # against an ASan build unless that runtime is itself instrumented or
+          # LD_PRELOADs libasan, which is a different exercise from this one.
+          CC="$HOME/sanbin/cc-san" CXX="$HOME/sanbin/cxx-san" \
+            ./tests/run_tests.sh ./flatland geometry parsing cli batch capi
+
+  # ---------------------------------------------------------------------------
+  # ThreadSanitizer over a genuinely threaded batch: many views, several
+  # workers, two shared field matrices read concurrently through the matrix
+  # cache, and PPM writes from every worker.
+  # ---------------------------------------------------------------------------
+  tsan:
+    name: ThreadSanitizer (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build with -fsanitize=thread
+        run: |
+          make clean
+          make CXXFLAGS="-std=c++17 -O1 -g -Wall -fsanitize=thread -fno-omit-frame-pointer" \
+               LDFLAGS="-pthread -fsanitize=thread"
+
+      - name: Generate a multi-view batch over sphere_fine.obj
+        run: |
+          mkdir -p tsan
+          python3 - <<'PY'
+          import math
+          # sphere_fine.obj has 10242 vertices; a node field needs one row each.
+          NV = sum(1 for line in open("examples/sphere_areas/sphere_fine.obj")
+                   if line.startswith("v "))
+          for name, cols in (("fieldA.txt", 4), ("fieldB.txt", 3)):
+              with open("tsan/" + name, "w") as f:
+                  f.write("# generated by CI for the ThreadSanitizer run\n")
+                  for i in range(NV):
+                      f.write(" ".join("%.4f" % math.sin(i * 0.01 + c)
+                                       for c in range(cols)) + "\n")
+          with open("tsan/views.txt", "w") as f:
+              f.write("# azimuth/elevation sweep, mixed resolutions and data files\n")
+              for k in range(96):
+                  az, el = k * 3.75, -60 + (k % 25) * 5
+                  res = 0.02 if k % 3 else 0.03
+                  data = ["fieldA.txt@%d" % (k % 4), "fieldB.txt@%d" % (k % 3), ""][k % 3]
+                  f.write("a %g %g %g %s\n" % (az, el, res, data))
+          print("views: 96, field rows:", NV)
+          PY
+
+      - name: Run the batch under ThreadSanitizer
+        env:
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: |
+          ./flatland examples/sphere_areas/sphere_fine.obj \
+            -b tsan/views.txt -t 8 -j -o tsan/img > tsan/out.json
+          # A clean exit is not enough on its own: make sure the run actually
+          # produced 96 results rather than bailing out early.
+          n=$(grep -c '"idx"' tsan/out.json)
+          test "$n" -eq 96 || { echo "expected 96 results, got $n"; exit 1; }
+
+      - name: Re-run single-threaded for comparison
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+        run: |
+          ./flatland examples/sphere_areas/sphere_fine.obj \
+            -b tsan/views.txt -t 1 -j > tsan/serial.json
+          diff <(grep '"area"' tsan/out.json) <(grep '"area"' tsan/serial.json) \
+            && echo "threaded and serial results agree"
