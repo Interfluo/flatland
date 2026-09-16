@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Interfluo
 #
 # Builds and runs the C ABI test the way a real consumer would: compiled with
 # the C compiler against include/flatland.h, then linked against BOTH the static

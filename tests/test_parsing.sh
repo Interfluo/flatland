@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Interfluo
 #
 # Mesh and field-file parsing: correct files must parse, malformed files must
 # produce a clean diagnostic. The cardinal rule tested throughout is that input

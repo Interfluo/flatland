@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Interfluo
 #
 # FlatLand test suite — dependency-free (bash + awk + a stock python3 for
 # generating binary STL fixtures).

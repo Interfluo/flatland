@@ -1,3 +1,9 @@
+% SPDX-License-Identifier: AGPL-3.0-or-later
+% Copyright (C) 2026 Interfluo
+%
+% FlatLand is dual-licensed: GNU AGPL v3 (see LICENSE) or a commercial licence
+% for closed-source or hosted use (see COMMERCIAL-LICENSE.md).
+
 function failures = flatland_test()
 %FLATLAND_TEST  Self-check for the FlatLand MATLAB binding.
 %

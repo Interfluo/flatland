@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Interfluo
+#
+# FlatLand is dual-licensed: GNU AGPL v3 (see LICENSE) or a commercial licence
+# for closed-source or hosted use (see COMMERCIAL-LICENSE.md).
+
 """Generate a time-dependent FlatLand case: orbiting view + evolving scalar field.
 
 Dependency-free: parses the OBJ itself and uses only the Python standard library

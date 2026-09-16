@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Interfluo
+#
+# FlatLand is dual-licensed: GNU AGPL v3 (see LICENSE) or a commercial licence
+# for closed-source or hosted use (see COMMERCIAL-LICENSE.md).
+
 """Run FlatLand against analytically-known answers and report the errors.
 
     python3 validation/run_validation.py [--flatland ./flatland] [--quick] [--json out.json]
