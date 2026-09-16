@@ -92,7 +92,10 @@ done
 # view order regardless of completion order.
 "$BIN" "$CUBE" -b "$B/case/series.txt" -t 1 -j 2>/dev/null | grep -v '"time"' > "$B/t1.json"
 "$BIN" "$CUBE" -b "$B/case/series.txt" -t 8 -j 2>/dev/null | grep -v '"time"' > "$B/t8.json"
-if diff -q "$B/t1.json" "$B/t8.json" >/dev/null; then
+# Compared in the shell rather than with diff: MSYS2's default toolchain ships
+# no diffutils, and `diff: command not found` reads as a real behavioural
+# difference rather than as a missing tool.
+if [ "$(cat "$B/t1.json")" = "$(cat "$B/t8.json")" ]; then
     ok "batch output is independent of thread count"
 else
     bad "batch output differs between -t 1 and -t 8"

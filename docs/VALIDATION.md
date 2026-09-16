@@ -12,8 +12,20 @@ make test                # the quick subset, as part of the test suite
 ```
 
 The numbers below were produced on Linux/x86-64 with GCC 13 in double precision.
-They will shift in the last digit or two on other toolchains; the tolerances are
-set well clear of that.
+Field arithmetic will shift in the last digit or two on other toolchains; the
+tolerances are set well clear of that.
+
+**Coverage, though, is not allowed to drift at all.** Which pixels a triangle
+claims is a discrete decision, so a one-ULP difference there is not a small error
+but a whole pixel. The rasterizer decides coverage from three edge functions and
+relies on `edge(a,b,p) == -edge(b,a,p)` holding exactly, so that a pixel centre
+lying on the shared edge of two triangles is claimed by both rather than by
+neither. Fusing a multiply and an add into an FMA breaks that antisymmetry and
+opens one-pixel cracks along shared edges — so FlatLand builds with
+`-ffp-contract=off` on every compiler that accepts it, and
+`tests/test_geometry.sh` pins exact pixel counts across a resolution sweep to
+keep it that way. Without the flag, a subdivided unit cube seen head-on covers
+98 pixels instead of 100 at `-r 0.1`, on arm64 or on x86-64 built with `-mfma`.
 
 ---
 

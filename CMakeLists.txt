@@ -36,6 +36,9 @@ set(FLATLAND_CORE_SOURCES
 # Compiler settings that are about portability rather than taste. PRIVATE
 # throughout: none of this is imposed on a consumer of the installed library.
 # ---------------------------------------------------------------------------
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag(-ffp-contract=off FLATLAND_HAS_NO_FP_CONTRACT)
+
 function(flatland_target_flags tgt)
     if(MSVC)
         target_compile_options(${tgt} PRIVATE
@@ -47,7 +50,13 @@ function(flatland_target_flags tgt)
             # Deliberately NOT /WX: the size_t/int narrowings MSVC flags here
             # are the same ones GCC's -Wconversion flags, and they are checked
             # and benign, so they should not be able to break a build.
-            /W4)
+            /W4
+            # See FPFLAGS in the Makefile: the rasterizer needs
+            # edge(a,b,p) == -edge(b,a,p) to hold exactly, so a multiply and an
+            # add must not fuse into an FMA. /fp:precise is already the default;
+            # it is spelled out so that a future default cannot quietly take the
+            # determinism away.
+            /fp:precise)
         target_compile_definitions(${tgt} PRIVATE
             # windows.h, reachable through some toolchain headers, defines min
             # and max as macros, which breaks std::numeric_limits<T>::max().
@@ -55,7 +64,14 @@ function(flatland_target_flags tgt)
             WIN32_LEAN_AND_MEAN
             _CRT_SECURE_NO_WARNINGS)
     else()
+        # -ffp-contract=off is a correctness requirement, not an optimisation
+        # preference; the Makefile's FPFLAGS comment explains what breaks
+        # without it. Probed rather than assumed, since CMAKE_CXX_COMPILER can
+        # be anything.
         target_compile_options(${tgt} PRIVATE -Wall)
+        if(FLATLAND_HAS_NO_FP_CONTRACT)
+            target_compile_options(${tgt} PRIVATE -ffp-contract=off)
+        endif()
     endif()
 endfunction()
 

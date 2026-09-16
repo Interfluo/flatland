@@ -82,13 +82,32 @@ fi
 # The shared library must export the C ABI and nothing else. A leaked C++ symbol
 # is an ABI-stability hazard: it ties every consumer to this exact compiler and
 # standard-library version.
+#
+# nm's spelling is not portable. GNU binutils needs -D to read a shared object's
+# dynamic table and --defined-only to drop imports; Apple's nm has neither flag,
+# and Mach-O prefixes every C symbol with an underscore. Getting this wrong does
+# not fail loudly -- the grep simply matches nothing, which is how the C++-leak
+# check below came to pass vacuously on macOS while its sibling failed.
 if command -v nm >/dev/null 2>&1 && [ -n "$SHARED" ]; then
-    n_c=$(nm -D --defined-only "$SHARED" 2>/dev/null | grep -c ' T fl_')
-    n_cxx=$(nm -D --defined-only "$SHARED" 2>/dev/null | grep ' T ' | grep -c '_ZN')
-    [ "${n_c:-0}" -ge 25 ] && ok "the shared library exports the C ABI ($n_c symbols)" \
-                           || bad "the shared library exports only ${n_c:-0} fl_ symbols"
-    [ "${n_cxx:-0}" -eq 0 ] && ok "no C++ symbols leak from the shared library" \
-                            || bad "${n_cxx} C++ symbols leak from the shared library"
+    case "$(uname -s)" in
+        Darwin) nm_defined() { nm -g "$1" 2>/dev/null; };                 pfx="_" ;;
+        *)      nm_defined() { nm -D --defined-only "$1" 2>/dev/null; };  pfx=""  ;;
+    esac
+
+    # Prove nm said something before believing a count of zero. Without this the
+    # two assertions below cannot tell "nothing leaked" from "nm was not
+    # understood", and silence reads as success.
+    n_text=$(nm_defined "$SHARED" | grep -c ' T ')
+    if [ "${n_text:-0}" -eq 0 ]; then
+        bad "nm reported no defined text symbols in $SHARED (unrecognised nm flavour?)"
+    else
+        n_c=$(nm_defined "$SHARED" | grep -c " T ${pfx}fl_")
+        n_cxx=$(nm_defined "$SHARED" | grep ' T ' | grep -c '_ZN')
+        [ "${n_c:-0}" -ge 25 ] && ok "the shared library exports the C ABI ($n_c symbols)" \
+                               || bad "the shared library exports only ${n_c:-0} fl_ symbols"
+        [ "${n_cxx:-0}" -eq 0 ] && ok "no C++ symbols leak from the shared library" \
+                                || bad "${n_cxx} C++ symbols leak from the shared library"
+    fi
 fi
 
 # --- header hygiene ---------------------------------------------------------

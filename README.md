@@ -69,6 +69,12 @@ r  = fl.project([1 0 0], 'Field', values);
   projection formulas, Cauchy's projection identity, analytic field integrals,
   blackbody radiant intensities and the Stefan–Boltzmann law — not against its
   own previous output. See [validation](#validation).
+- **Deterministic.** The same mesh, direction and resolution give the same
+  covered-pixel count on every platform. FlatLand builds with
+  `-ffp-contract=off`, because the rasterizer decides coverage from three edge
+  functions and needs `edge(a,b,p) == -edge(b,a,p)` to hold *exactly*; fusing a
+  multiply and an add breaks that and opens one-pixel cracks along shared
+  triangle edges on any target with an FMA instruction.
 - **Fast.** Multi-threaded batches: ~1000 changing-field, changing-view timesteps
   on a 70k-triangle mesh in a couple of seconds.
 - **Dependency-free.** Standard C++17 and nothing else. One compiler invocation
@@ -257,7 +263,7 @@ Run it yourself with `make validate`.
 ## Testing
 
 ```shell
-make test                              # everything, 548 assertions
+make test                              # everything, 555 assertions
 ./tests/run_tests.sh ./flatland cli    # one suite
 ```
 

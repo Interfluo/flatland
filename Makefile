@@ -15,6 +15,24 @@ CXX      ?= c++
 CC       ?= cc
 CXXFLAGS ?= -std=c++17 -O2 -Wall
 LDFLAGS  ?= -pthread
+
+# Determinism, not taste, and deliberately NOT part of CXXFLAGS so that
+# overriding those cannot silently drop it.
+#
+# -ffp-contract=off forbids the compiler from fusing a multiply and an add into
+# a single FMA. The rasterizer needs that: it decides coverage with the three
+# edge functions, and relies on edge(a,b,p) == -edge(b,a,p) holding EXACTLY, so
+# a pixel centre lying on the shared edge of two triangles is claimed by both
+# rather than by neither. Contraction rounds the two sides differently, the
+# antisymmetry breaks, and one-pixel cracks open along shared edges.
+#
+# This is invisible on baseline x86-64, which has no FMA instruction, and shows
+# up on arm64, which does: a subdivided unit cube at -r 0.1 covers 100 pixels on
+# one and 98 on the other. A tool whose whole output is a measurement has to give
+# the same answer on every machine, so the fusion goes.
+# Probed via stdin rather than /dev/null, which MSYS2 maps onto NUL.
+FPFLAGS  := $(shell echo | $(CXX) -ffp-contract=off -E -x c++ - >/dev/null 2>&1 \
+                    && echo -ffp-contract=off)
 PREFIX   ?= /usr/local
 PYTHON   ?= python3
 
@@ -69,7 +87,7 @@ BIN       = flatland$(EXE)
 .PHONY: all lib test validate install clean
 
 $(BIN): $(CORE_OBJ) $(CLI_OBJ)
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) $(FPFLAGS) $^ -o $@ $(LDFLAGS)
 
 all: $(BIN) lib
 lib: $(STATICLIB) $(SHAREDLIB)
@@ -80,13 +98,13 @@ $(STATICLIB): $(CORE_OBJ) $(CAPI_OBJ)
 # -fvisibility=hidden keeps the engine's C++ symbols internal, so the shared
 # library exports only what flatland.h marks FL_API.
 $(SHAREDLIB): $(LIB_PIC)
-	$(CXX) $(CXXFLAGS) $(SOFLAGS) $^ -o $@ $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) $(FPFLAGS) $(SOFLAGS) $^ -o $@ $(LDFLAGS)
 
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $(FL_API_DEF) -MMD -MP -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(FPFLAGS) $(INCLUDES) $(FL_API_DEF) -MMD -MP -c $< -o $@
 
 %.pic.o: %.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $(FL_API_DEF) -fPIC -fvisibility=hidden -MMD -MP -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(FPFLAGS) $(INCLUDES) $(FL_API_DEF) -fPIC -fvisibility=hidden -MMD -MP -c $< -o $@
 
 # The C ABI's only Windows-visible difference between the two libraries is which
 # way FL_API points, and that is decided per object file, not per source file.

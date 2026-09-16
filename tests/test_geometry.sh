@@ -89,6 +89,32 @@ for mag in 1e25 1e-25; do
     rel_near "$(jget "$G/mag.json" area)" 1.0 0.01 "float: view magnitude $mag is irrelevant"
 done
 
+sect "Coverage is crack-free along shared edges"
+
+# The reference cube is subdivided (26 vertices, 48 triangles), so each face is
+# four quads split by diagonals -- and at these resolutions a whole run of pixel
+# centres lands EXACTLY on those shared diagonals.
+#
+# The fill rule admits a pixel when all three edge functions are >= 0, so a
+# centre lying exactly on a shared edge is claimed by BOTH neighbouring
+# triangles. That only holds while edge(a,b,p) == -edge(b,a,p) is exact. Let the
+# compiler fuse a multiply and an add into an FMA and the two sides round
+# differently: both come out slightly negative, the pixel is claimed by NEITHER,
+# and one-pixel cracks open along every diagonal. Hence -ffp-contract=off in the
+# Makefile's FPFLAGS and in CMakeLists.txt.
+#
+# Seen head-on, a unit face at resolution 1/n must cover exactly n^2 pixels.
+# Without that flag this reports 98 of 100 at 0.1 and 398 of 400 at 0.05 on any
+# target that has an FMA instruction -- arm64, or x86-64 built with -mfma --
+# while staying correct at 0.25, 0.125 and 0.025. The sweep is the test; no
+# single resolution would have caught it.
+for r in 0.5 0.25 0.2 0.125 0.1 0.05 0.025; do
+    n=$(awk "BEGIN{printf \"%d\", 1/$r + 0.5}")
+    "$BIN" "$CUBE" -v 1 0 0 --res "$r" -j 2>/dev/null > "$G/crack.json"
+    equal "$(jget "$G/crack.json" pixels)" "$((n*n))" \
+          "unit face at resolution $r covers exactly $((n*n)) pixels"
+done
+
 sect "Degenerate and empty views"
 
 # The degenerate-triangle cutoff must scale with the geometry. An absolute
