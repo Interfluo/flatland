@@ -302,6 +302,137 @@ def study_lambert(run, rep, quick):
                   f"icosphere({k}) mean", r["average"], C.LAMBERT_MEAN, tol)
 
 
+def study_blackbody(run, rep, quick):
+    """Blackbody radiation: the area integral read as a radiant intensity.
+
+    FlatLand computes I = integral f dA over the PROJECTED area, and projected
+    area is cos(theta) dA_surface. So when f is a radiance, I is literally the
+    radiant intensity toward the camera:
+
+        I(n) = integral_visible L cos(theta) dA_surface        [W/sr]
+
+    A blackbody is a Lambertian emitter with L = sigma T^4 / pi, which gives a
+    family of cases with exact answers and a physical reading. Nothing in the
+    engine knows any of this — it is the generic area integral, and the meaning
+    is supplied by the field.
+    """
+    T = 1200.0
+    L = C.blackbody_radiance(T)
+    res = 0.004 if quick else 0.001
+    src = (0.0, 0.0, 1.0)
+
+    # --- 1. Isothermal sphere: I = sigma T^4 r^2, the same from every side ---
+    v, f = C.icosphere(4 if quick else 5, 1.0)
+    C.write_obj(os.path.join(run.workdir, "bb_iso.obj"), v, f)
+    C.write_field(os.path.join(run.workdir, "bb_iso.txt"),
+                  C.isothermal_radiance_field(len(v), T))
+    dirs = C.fibonacci_directions(6 if quick else 12)
+    exact_I = C.isothermal_sphere_intensity(T, 1.0)
+    print(f"\n  Isothermal blackbody sphere at {T:.0f} K: "
+          f"I = sigma T^4 r^2 = {exact_I:.3f} W/sr, isotropic")
+    print(f"  {'direction':>28} {'I [W/sr]':>13} {'L [W/m2/sr]':>13} {'rel err':>10}")
+    results = run.batch("bb_iso.obj", dirs, res, "bb_iso.txt", ["-p", "double"])
+    for d, r in zip(dirs, results):
+        rel = abs(r["integral"] - exact_I)/exact_I
+        print(f"  ({d[0]:>6.3f},{d[1]:>6.3f},{d[2]:>6.3f})      "
+              f"{r['integral']:>13.4f} {r['average']:>13.4f} {rel:>10.2e}")
+        # The intensity carries the mesh's fidelity to a true sphere; the MEAN
+        # does not, because a constant field must interpolate to exactly that
+        # constant at every covered pixel whatever shape it covers. Hence the
+        # six-order-of-magnitude difference in what the two can be held to.
+        rep.check("Blackbody: isothermal sphere I == sigma T^4 r^2",
+                  "direction (%.2f, %.2f, %.2f)" % d, r["integral"], exact_I,
+                  5e-3 if quick else 1.5e-3)
+        rep.check("Blackbody: isothermal sphere I == sigma T^4 r^2",
+                  "mean radiance (%.2f, %.2f, %.2f)" % d, r["average"], L, 1e-9)
+
+    # --- 2. Stefan-Boltzmann recovered from projected areas alone -----------
+    # Integrating the radiant intensity over all directions gives the total
+    # radiated power. Cauchy's identity <A_proj> = S/4 makes this exact for any
+    # convex body, so the surface area never enters FlatLand's side of it.
+    # This one is limited by direction SAMPLING, not by the raster: halving the
+    # pixel size below changes the answer by less than the Fibonacci spiral's
+    # own residual does. So it runs coarser than the rest of the study and costs
+    # a quarter as much.
+    n_dirs = 200 if quick else 800
+    res_sweep = 2*res
+    print(f"\n  Stefan-Boltzmann closure: 4 pi <I> == sigma T^4 S "
+          f"over {n_dirs} directions, resolution {res_sweep:g}")
+    print(f"  {'shape':>16} {'tris':>6} {'4 pi <I> [W]':>15} {'sigma T^4 S':>15} {'rel err':>10}")
+    shapes = [("cube", C.unit_cube()), ("octahedron", C.regular_octahedron(1.0))]
+    if not quick:
+        shapes.append(("icosphere(3)", C.icosphere(3, 1.0)))
+    for name, (sv, sf) in shapes:
+        mesh = "bb_%s.obj" % name.replace("(", "").replace(")", "")
+        C.write_obj(os.path.join(run.workdir, mesh), sv, sf)
+        C.write_field(os.path.join(run.workdir, "bb_const.txt"),
+                      C.isothermal_radiance_field(len(sv), T))
+        sdirs = C.fibonacci_directions(n_dirs)
+        rs = run.batch(mesh, sdirs, res_sweep, "bb_const.txt", ["-p", "double"])
+        power = 4*math.pi*sum(x["integral"] for x in rs)/len(rs)
+        exact_P = C.blackbody_power(sv, sf, T)
+        print(f"  {name:>16} {len(sf):>6} {power:>15.2f} {exact_P:>15.2f} "
+              f"{abs(power-exact_P)/exact_P:>10.2e}")
+        # Dominated by direction SAMPLING, not by FlatLand: the tolerance
+        # tracks n_dirs, which is why quick mode gets a looser one.
+        rep.check("Blackbody: 4 pi <I> == sigma T^4 S (Stefan-Boltzmann)",
+                  f"{name}, {n_dirs} directions", power, exact_P,
+                  2e-3 if quick else 1e-4)
+
+    # --- 3. Graded T^4: affine in position, exactly interpolable ------------
+    # T(p)^4 = T_max^4 (1 + cos psi)/2, so the RADIANCE is linear in the vertex
+    # coordinates and barycentric interpolation reproduces it exactly. The only
+    # errors left are the rasterizer's and the mesh's, and the two columns below
+    # separate them.
+    _phase_sweep(run, rep, quick, "graded T^4 (no terminator)",
+                 C.graded_radiance_field, C.graded_sphere_intensity, T, res, src,
+                 tol_raster=5e-4 if quick else 1.5e-3,
+                 tol_mesh=0.02 if quick else 1.5e-3)
+
+    # --- 4. Radiative equilibrium: a real terminator ------------------------
+    # T = T_sub cos^{1/4}(psi) on the lit side, zero beyond it. The kink at the
+    # terminator cannot be represented by per-vertex linear interpolation, so the
+    # mesh column is worse than in case 3 and improves only with refinement.
+    _phase_sweep(run, rep, quick, "radiative equilibrium (Lambert phase)",
+                 C.equilibrium_radiance_field, C.equilibrium_sphere_intensity, T, res, src,
+                 tol_raster=5e-4 if quick else 1.5e-3,
+                 tol_mesh=0.03 if quick else 6e-3)
+
+
+def _phase_sweep(run, rep, quick, label, field_fn, exact_fn, T, res, src,
+                 tol_raster, tol_mesh):
+    """Sweep the phase angle of a non-isothermal blackbody sphere.
+
+    Reports FlatLand against two references: the exact integral over the MESH it
+    was actually handed (which isolates rasterization), and the closed form for
+    the smooth SPHERE (which adds the mesh's own fidelity).
+    """
+    k = 3 if quick else 5
+    v, f = C.icosphere(k, 1.0)
+    vals = field_fn(v, src, T)
+    mesh = "bb_phase.obj"
+    C.write_obj(os.path.join(run.workdir, mesh), v, f)
+    C.write_field(os.path.join(run.workdir, "bb_phase.txt"), vals)
+    angles = [0, 60, 120] if quick else [0, 30, 60, 90, 120, 150]
+    dirs = [C.phase_view(src, math.radians(a)) for a in angles]
+    rs = run.batch(mesh, dirs, res, "bb_phase.txt", ["-p", "double"])
+    print(f"\n  Non-isothermal blackbody sphere, {label}")
+    print(f"  icosphere({k}), {len(f)} triangles, {T:.0f} K peak")
+    print(f"  {'phase':>6} {'I FlatLand':>13} {'I mesh-exact':>13} {'I sphere':>13} "
+          f"{'raster':>9} {'vs sphere':>10}")
+    for a, r in zip(angles, rs):
+        rad = math.radians(a)
+        mesh_exact = C.field_integral_convex(v, f, vals, C.phase_view(src, rad))[0]
+        smooth = exact_fn(T, 1.0, rad)
+        print(f"  {a:>5}d {r['integral']:>13.4f} {mesh_exact:>13.4f} {smooth:>13.4f} "
+              f"{abs(r['integral']-mesh_exact)/mesh_exact:>9.2e} "
+              f"{abs(r['integral']-smooth)/smooth:>10.2e}")
+        rep.check(f"Blackbody {label}: FlatLand vs the mesh's own exact integral",
+                  f"phase {a} deg", r["integral"], mesh_exact, tol_raster)
+        rep.check(f"Blackbody {label}: FlatLand vs the smooth-sphere closed form",
+                  f"phase {a} deg", r["integral"], smooth, tol_mesh)
+
+
 def study_convergence(run, rep, quick):
     """Error against pixel size, to confirm the documented convergence behaviour.
 
@@ -396,6 +527,7 @@ STUDIES = [
     ("cylinder",    study_cylinder),
     ("fields",      study_linear_fields),
     ("lambert",     study_lambert),
+    ("blackbody",   study_blackbody),
     ("convergence", study_convergence),
     ("invariance",  study_invariances),
 ]

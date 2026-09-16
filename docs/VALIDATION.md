@@ -7,7 +7,7 @@ stored baseline, so a wrong answer cannot be blessed into a regression fixture.
 Reproduce everything here with:
 
 ```shell
-make validate            # the full study, ~3 s
+make validate            # the full study, ~8 s
 make test                # the quick subset, as part of the test suite
 ```
 
@@ -62,8 +62,39 @@ triangle is the mean of its vertex values:
 
 $$\frac{1}{A}\int f\,dA = \frac{f_0+f_1+f_2}{3}$$
 
+
+### Reading the integral as a radiant intensity
+
+Three of the studies below are phrased as blackbody radiation. That is not a
+feature of the tool — it is one reading of the same generic integral, and it is
+worth spelling out because it is the reading most users arrive with.
+
+FlatLand integrates over the *projected* area, and projected area is
+$dA_\perp = \cos\theta\,dA$ with $\theta$ the angle between the surface normal
+and the viewer. So for a field $f = L$, a radiance,
+
+$$I(\hat n) = \int L\,dA_\perp = \int_{\text{visible}} L\cos\theta\,dA
+\qquad [\mathrm{W/sr}]$$
+
+which is the definition of radiant intensity. A blackbody is a Lambertian
+emitter, so its radiance is isotropic and fixed by temperature alone:
+
+$$M = \sigma T^4 \quad [\mathrm{W/m^2}], \qquad L = M/\pi \quad [\mathrm{W/m^2\,sr}]$$
+
+The $\pi$ is the projected solid angle of a hemisphere,
+$\int\cos\theta\,d\Omega = \pi$. Two consequences make good test cases: the
+intensity of an *isothermal* body is its projected area times $\sigma T^4/\pi$
+from every direction, and integrating that over all directions must return the
+Stefan–Boltzmann law.
+
+$\sigma$ itself is not a fitted number. The 2019 SI fixes $h$, $k$ and $c$
+exactly, so $\sigma = 2\pi^5k^4/15h^3c^2 =
+5.670374419\!\times\!10^{-8}\ \mathrm{W\,m^{-2}K^{-4}}$ is exact, and
+`self_check.py` rebuilds it from those three constants rather than trusting the
+literal in `cases.py`.
+
 The formulas themselves are checked before anything else runs
-(`validation/self_check.py`, 33 identities) against values known from elsewhere —
+(`validation/self_check.py`, 67 identities) against values known from elsewhere —
 that a cube down its body diagonal projects to a regular hexagon of area
 $\sqrt3$, that a regular tetrahedron has $S=\sqrt3 e^2$, that an inscribed
 polyhedron must understate the sphere and improve monotonically with
@@ -187,6 +218,133 @@ integral is a radiant intensity. FlatLand attaches no physical meaning to it —
 it is the area integral of a scalar field, and what that scalar means is the
 caller's business.
 
+### Blackbody radiation — closed forms with a physical reading
+
+Four cases, ordered by how much they ask of the tool. All run at 1200 K in
+double precision. See [Reading the integral as a radiant
+intensity](#reading-the-integral-as-a-radiant-intensity) for the radiometry.
+
+**1. Isothermal sphere.** The radiance is constant, so $A_\perp = \pi r^2$ gives
+
+$$I = \frac{\sigma T^4}{\pi}\,\pi r^2 = \sigma T^4 r^2
+\qquad\text{from every direction}$$
+
+Twelve Fibonacci directions on an icosphere(5), exact value 117580.884 W/sr:
+
+| Quantity | Spread over 12 directions | Rel. error |
+| :--- | ---: | ---: |
+| $I$ [W/sr] | 117543.84 – 117548.00 | 2.8–3.2×10⁻⁴ |
+| $L$ [W/m²/sr] | 37427.15779 (identical to 11 digits) | 1.4×10⁻¹¹ |
+
+The two rows differ by seven orders of magnitude, and the reason is the whole
+argument of this page. $I$ inherits the icosphere's projected-area deficit — the
+mesh is inscribed, so it genuinely projects to slightly less than $\pi r^2$.
+$L$ is the *mean*, and a constant field must interpolate to exactly that constant
+at every covered pixel regardless of what shape those pixels cover. So the mean
+measures interpolation alone, and it is exact.
+
+**2. Stefan–Boltzmann, recovered from projected areas.** Integrating the
+intensity over all directions and applying Cauchy's identity:
+
+$$\oint I\,d\Omega = \frac{\sigma T^4}{\pi}\oint A_\perp\,d\Omega
+= \frac{\sigma T^4}{\pi}\,(4\pi)\frac{S}{4} = \sigma T^4 S$$
+
+The left-hand side never uses the surface area; getting $\sigma T^4S$ back out is
+the check. 800 directions, resolution 2×10⁻³:
+
+| Shape | Triangles | $4\pi\langle I\rangle$ [W] | $\sigma T^4 S$ [W] | Rel. error |
+| :--- | ---: | ---: | ---: | ---: |
+| cube | 12 | 705497.75 | 705485.30 | 1.8×10⁻⁵ |
+| octahedron | 8 | 814633.47 | 814624.26 | 1.1×10⁻⁵ |
+| icosphere(3) | 1280 | 1470538.88 | 1470524.47 | 9.8×10⁻⁶ |
+
+The residual is direction *sampling*, not FlatLand — and it is measurably so.
+Halving the pixel size to 10⁻³ moves the worst case from 1.8×10⁻⁵ to 1.1×10⁻⁵
+and costs four times as much; the number of directions is what sets it, which is
+the same quantity the Cauchy study measures. This case therefore runs at a
+coarser resolution than the rest of the study on purpose.
+
+**3. Graded $T^4$ — affine in position, no terminator.** Take a sphere with
+
+$$T(p)^4 = T_{\max}^4\,\frac{1 + \hat p\cdot\hat s}{2}$$
+
+hot at the pole facing $\hat s$, falling to absolute zero at the antipode,
+non-negative everywhere. The radiance is then *linear in the vertex coordinates*,
+so barycentric interpolation reproduces it exactly and no field-representation
+error enters at all. Two standard hemisphere integrals,
+$\int\cos\theta\,d\Omega = \pi$ and
+$\int(\hat p\cdot\hat s)\cos\theta\,d\Omega = \tfrac{2\pi}{3}\cos\alpha$, give
+
+$$I(\alpha) = \frac{\sigma T_{\max}^4 r^2}{2}\left[1 + \tfrac{2}{3}\cos\alpha\right]$$
+
+with $\alpha$ the phase angle between the source and the observer. icosphere(5),
+20480 triangles, resolution 10⁻³:
+
+| Phase | $I$ FlatLand | Exact for the *mesh* | Exact for the *sphere* | Raster err. | vs. sphere |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0° | 97945.042 | 97944.156 | 97984.070 | 9.1×10⁻⁶ | 4.0×10⁻⁴ |
+| 30° | 92697.474 | 92696.801 | 92733.119 | 7.3×10⁻⁶ | 3.8×10⁻⁴ |
+| 60° | 78359.804 | 78359.429 | 78387.256 | 4.8×10⁻⁶ | 3.5×10⁻⁴ |
+| 90° | 58772.614 | 58771.724 | 58790.442 | 1.5×10⁻⁵ | 3.0×10⁻⁴ |
+| 120° | 39187.382 | 39186.996 | 39193.628 | 9.9×10⁻⁶ | 1.6×10⁻⁴ |
+| 150° | 24848.832 | 24848.157 | 24847.764 | 2.7×10⁻⁵ | 4.3×10⁻⁵ |
+
+The middle column is the exact integral over the polyhedron FlatLand was
+actually handed (`cases.field_integral_convex`), so the "raster err." column is
+rasterization alone — ~10⁻⁵ — while "vs. sphere" adds the mesh's own fidelity.
+Same separation as the sphere area study, same conclusion: the tool reproduces
+its input mesh to five digits, and the rest belongs to the mesh.
+
+**4. Radiative equilibrium — a real terminator.** A sphere in instantaneous
+equilibrium with a distant source balances absorbed flux $\propto\cos\psi$
+against $\sigma T^4$, giving the classic subsolar law
+
+$$T(\psi) = T_{\text{sub}}\cos^{1/4}\psi \quad\text{on the lit side},\qquad 0\ \text{beyond it}$$
+
+so $\sigma T^4 = \sigma T_{\text{sub}}^4\max(\cos\psi, 0)$. The disc-integrated
+result is the Lambert-sphere phase function — Russell's 1916 planetary
+photometry result:
+
+$$I(\alpha) = \tfrac{2}{3}\sigma T_{\text{sub}}^4 r^2\,\Phi(\alpha),
+\qquad \Phi(\alpha) = \frac{\sin\alpha + (\pi-\alpha)\cos\alpha}{\pi}$$
+
+with $\Phi(0)=1$, $\Phi(\pi/2)=1/\pi$, $\Phi(\pi)=0$. Unlike case 3 this has a
+**kink** at the terminator, which per-vertex linear interpolation cannot
+represent, so the mesh column should be worse. Same mesh and resolution:
+
+| Phase | $I$ FlatLand | Exact for the *mesh* | Exact for the *sphere* | Raster err. | vs. sphere |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0° | 78344.855 | 78344.865 | 78387.256 | 1.2×10⁻⁷ | 5.4×10⁻⁴ |
+| 30° | 69012.250 | 69011.912 | 69046.848 | 4.9×10⁻⁶ | 5.0×10⁻⁴ |
+| 60° | 47716.559 | 47716.273 | 47737.665 | 6.0×10⁻⁶ | 4.4×10⁻⁴ |
+| 90° | 24940.786 | 24940.442 | 24951.439 | 1.4×10⁻⁵ | 4.3×10⁻⁴ |
+| 120° | 8544.137 | 8543.840 | 8544.037 | 3.5×10⁻⁵ | 1.2×10⁻⁵ |
+| 150° | 1163.591 | 1163.269 | 1161.493 | 2.8×10⁻⁴ | 1.8×10⁻³ |
+
+It is, and in the expected place: at 150° only a thin lit crescent is visible,
+the terminator runs through most of it, and the error against the true sphere
+grows to 1.8×10⁻³ while the rasterization column stays at 10⁻⁴. The 1.2×10⁻⁵ at
+120° is a **coincidence** — the mesh's area deficit and the terminator error have
+opposite signs and cross there. That is exactly why the check is a sweep and not
+a single angle; agreement at one point is not evidence.
+
+Against the smooth sphere both cases converge fourfold per subdivision level at
+low phase — second order in the mesh edge length, as piecewise-linear
+interpolation requires. Measured at 0° phase for subdivisions 2–5:
+
+| Subdiv | Triangles | Graded, vs. sphere | Equilibrium, vs. sphere |
+| ---: | ---: | ---: | ---: |
+| 2 | 320 | 2.56×10⁻² | 3.38×10⁻² |
+| 3 | 1280 | 6.49×10⁻³ (×3.9) | 8.61×10⁻³ (×3.9) |
+| 4 | 5120 | 1.63×10⁻³ (×4.0) | 2.16×10⁻³ (×4.0) |
+| 5 | 20480 | 4.07×10⁻⁴ (×4.0) | 5.41×10⁻⁴ (×4.0) |
+
+The graded case holds that rate at every phase angle. The equilibrium case does
+not: at 120° it refines by only ×2.3 between subdivisions 3 and 4, because the
+terminator error is a different and slower-converging term that the smooth case
+does not have. That is the cost of the kink, and it is visible in the data rather
+than argued for.
+
 ### Convergence with pixel size
 
 Unit cube, generic view direction (0.3, 0.9, −0.31), exact answer 1.51295314.
@@ -240,6 +398,10 @@ magnitude of headroom, tightest where the physics is exact:
 | Sphere vs. its own mesh | 4×10⁻³ | pure rasterization |
 | Lambertian, subdiv 2 | 5×10⁻² | coarse mesh dominates |
 | Lambertian, subdiv ≥4 | 1×10⁻² | mesh error has largely gone |
+| Blackbody, mean radiance | 10⁻⁹ | a constant field is interpolated exactly |
+| Blackbody vs. the mesh's own integral | 1.5×10⁻³ | pure rasterization |
+| Blackbody vs. the smooth sphere | 1.5–6×10⁻³ | mesh fidelity dominates |
+| Stefan–Boltzmann closure | 10⁻⁴ | direction sampling, scaled to the count |
 | Invariances | 10⁻⁹ or exact | these are identities, not approximations |
 
 ---
@@ -260,6 +422,18 @@ use:
   the rasterizer's own error from floating-point noise. The float path is
   covered separately by the invariance and conditioning tests in
   `tests/test_geometry.sh`.
+- **The blackbody cases cover emission only, and only spectrally integrated.**
+  $\sigma T^4$ is the *total* exitance over all wavelengths. A band-limited
+  intensity needs the Planck fraction $F(\lambda T)$, which has no elementary
+  closed form — it is a rapidly convergent series, not an identity — so no study
+  here pins one. Nothing here covers absorption, reflection, or any second
+  bounce either: FlatLand resolves one visible surface per pixel and integrates
+  over it, which is what these cases test and all they test.
+- **The quick tier cannot catch a wrong formula.** Its mesh tolerances are sized
+  for a coarse icosphere (1–3×10⁻²), so a percent-level error in a closed form
+  would pass it. The full study does catch one, and `self_check.py` — which runs
+  first, in both tiers — catches it decisively. That layering is the defence, not
+  the study tolerances.
 - **These are accuracy studies, not performance ones.** Nothing here measures
   throughput.
 - **The mesh generators are shared** between the expectations and the inputs, so

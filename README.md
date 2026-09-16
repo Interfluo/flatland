@@ -30,10 +30,10 @@ changing view direction *and* a changing field over a fixed mesh, in seconds.
 | **Command line** | `./flatland mesh.obj -v 1 0 0` |
 | **Anything else** | The C ABI is consumable from Julia, R, C#, Go, Rust — anything that speaks C |
 
-Five worked examples, written twice so the two bindings are directly comparable:
+Six worked examples, written twice so the two bindings are directly comparable:
 projected area and orientation sweeps, geometry straight from memory, field
-integrals, a parallel time series, and getting at the raster — see
-**[examples/README.md](examples/README.md)**.
+integrals, a parallel time series, getting at the raster, and checking the
+answers against closed forms — see **[examples/README.md](examples/README.md)**.
 
 The library takes **arrays**, not just files. You do not have to write a mesh to
 disk and shell out to use it.
@@ -66,8 +66,9 @@ r  = fl.project([1 0 0], 'Field', values);
 ## Design goals
 
 - **Correct, and shown to be.** Checked against closed-form results — convex
-  projection formulas, Cauchy's projection identity, analytic field integrals —
-  not against its own previous output. See [validation](#validation).
+  projection formulas, Cauchy's projection identity, analytic field integrals,
+  blackbody radiant intensities and the Stefan–Boltzmann law — not against its
+  own previous output. See [validation](#validation).
 - **Fast.** Multi-threaded batches: ~1000 changing-field, changing-view timesteps
   on a 70k-triangle mesh in a couple of seconds.
 - **Dependency-free.** Standard C++17 and nothing else. One compiler invocation
@@ -240,6 +241,9 @@ measured tables. Highlights:
 | Sphere vs. its own mesh's exact projected area, 5 subdivision levels | ~10⁻⁶, flat in subdivision |
 | Cylinder `2rh sin θ + πr² cos θ`, seven angles | worst 4.6×10⁻⁵ |
 | Lambertian sphere `∫cos dA = (2/3)πr²` | 5.4×10⁻⁴ at 20480 triangles |
+| Blackbody sphere `I = σT⁴r²`, twelve directions | 2.8–3.2×10⁻⁴; the mean radiance to 1.4×10⁻¹¹ |
+| Stefan–Boltzmann `4π⟨I⟩ = σT⁴S`, three convex shapes | worst 1.1×10⁻⁵ |
+| Radiative-equilibrium sphere vs. the Lambert phase function | 10⁻⁷–10⁻⁴ against its own mesh |
 | Translation by 5×10⁶, and culled vs. `--no-cull` | exact |
 
 The sphere study is the informative one: rasterization error stays near 10⁻⁶ and
@@ -253,7 +257,7 @@ Run it yourself with `make validate`.
 ## Testing
 
 ```shell
-make test                              # everything, 514 assertions
+make test                              # everything, 548 assertions
 ./tests/run_tests.sh ./flatland cli    # one suite
 ```
 

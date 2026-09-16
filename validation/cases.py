@@ -132,6 +132,33 @@ def field_integral_planar(verts, faces, values, direction):
     return total_i, total_a, (total_i/total_a if total_a else float("nan"))
 
 
+def field_integral_convex(verts, faces, values, direction):
+    """Exact area integral of a per-vertex field over the VISIBLE side of a
+    closed convex mesh.
+
+    The front-facing triangles of a convex body tile the projection exactly
+    once, so the projected integral is the sum over them of (projected area) x
+    (mean of the three vertex values) - exact for the same reason as above.
+
+    This is what FlatLand should converge to FOR THAT MESH as the pixel size
+    shrinks, with no reference to whatever smooth shape the mesh approximates.
+    Checking against both this and the smooth closed form separates
+    rasterization error from mesh fidelity, which is the only way to tell which
+    one to spend effort on. Returns (integral, area, mean).
+    """
+    n = unit(direction)
+    total_a = 0.0
+    total_i = 0.0
+    for f in faces:
+        c = face_cross(verts, f)
+        if dot(c, n) >= 0:
+            continue                    # back-facing: the camera looks ALONG n
+        a = 0.5 * abs(dot(n, c))
+        total_a += a
+        total_i += a * (values[f[0]] + values[f[1]] + values[f[2]]) / 3.0
+    return total_i, total_a, (total_i/total_a if total_a else float("nan"))
+
+
 def fibonacci_directions(count):
     """`count` quasi-uniform directions on the sphere (Fibonacci spiral).
 
@@ -334,6 +361,214 @@ def lambert_integral(radius=1.0):
 def coordinate_field(verts, axis):
     """f = the given coordinate of each vertex. Linear, so exactly interpolated."""
     return [p[axis] for p in verts]
+
+# --------------------------------------------------------------------------
+# Blackbody radiation: fields whose area integral is a radiant intensity
+# --------------------------------------------------------------------------
+#
+# This section is a worked instance of the generic machinery above, not a
+# special case in the tool. FlatLand computes
+#
+#     I = integral f dA_projected
+#
+# and dA_projected = cos(theta) dA_surface, where theta is the angle between the
+# surface normal and the viewer. That is exactly the definition of radiant
+# intensity when f is a radiance:
+#
+#     I(n) = integral_visible L cos(theta) dA_surface        [W/sr]
+#
+# A blackbody is a Lambertian emitter, so its radiance is isotropic and fixed by
+# temperature alone:
+#
+#     M = sigma T^4          (Stefan-Boltzmann exitance, W/m^2)
+#     L = M / pi             (radiance, W/m^2/sr)
+#
+# The pi is the projected solid angle of a hemisphere, integral cos dOmega = pi.
+# Feed FlatLand L as a per-vertex field and the number it reports as `integral`
+# IS the radiant intensity toward the camera. Everything below is a closed-form
+# value for that number.
+#
+# sigma is exact in the 2019 SI: the defining constants h, k and c fix
+# sigma = 2 pi^5 k^4 / (15 h^3 c^2) with no experimental uncertainty.
+
+STEFAN_BOLTZMANN = 5.670374419184431e-8      # W m^-2 K^-4
+
+
+def blackbody_exitance(temperature):
+    """M = sigma T^4, the power leaving unit area of a blackbody surface."""
+    return STEFAN_BOLTZMANN * temperature**4
+
+
+def blackbody_radiance(temperature):
+    """L = sigma T^4 / pi, the radiance of a blackbody. Isotropic: it is the
+    Lambertian cos(theta) in the projection that makes the emission directional,
+    not the radiance itself."""
+    return blackbody_exitance(temperature) / math.pi
+
+
+def perpendicular(a):
+    """Some unit vector orthogonal to a. Only its existence matters here."""
+    u = unit(a)
+    other = (1.0, 0.0, 0.0) if abs(u[0]) < 0.9 else (0.0, 1.0, 0.0)
+    return unit(cross(u, other))
+
+
+def phase_view(source, alpha_rad):
+    """A FlatLand view direction at phase angle alpha from `source`.
+
+    The phase angle is the angle subtended at the body between the source and
+    the observer. The observer sits in the direction ehat from the centre, and
+    FlatLand wants the direction the camera LOOKS ALONG, which is -ehat.
+
+    alpha = 0 puts the observer at the source ("full" phase, the hot pole facing
+    us); alpha = pi puts it behind the body.
+    """
+    s = unit(source)
+    t = perpendicular(s)
+    e = add(scale(s, math.cos(alpha_rad)), scale(t, math.sin(alpha_rad)))
+    return scale(unit(e), -1.0)
+
+
+def phase_angle(source, direction):
+    """Recover the phase angle from a source direction and a view direction."""
+    c = dot(unit(source), scale(unit(direction), -1.0))
+    return math.acos(max(-1.0, min(1.0, c)))
+
+
+# --- 1. Isothermal -------------------------------------------------------
+
+def isothermal_radiance_field(n_vertices, temperature):
+    """A uniform blackbody at `temperature`: one radiance per vertex."""
+    return [blackbody_radiance(temperature)] * n_vertices
+
+
+def isothermal_intensity(temperature, projected_area):
+    """I = L A_proj for any isothermal body, from any direction.
+
+    Because L is constant this is exact for every shape FlatLand can measure:
+    the radiant intensity of an isothermal blackbody is its projected area times
+    sigma T^4 / pi, which is why projected area is the quantity IR work wants.
+    """
+    return blackbody_radiance(temperature) * projected_area
+
+
+def isothermal_sphere_intensity(temperature, radius=1.0):
+    """For a sphere A_proj = pi r^2, so the pi cancels:
+
+        I = (sigma T^4 / pi)(pi r^2) = sigma T^4 r^2
+
+    and it is the same in every direction.
+    """
+    return blackbody_exitance(temperature) * radius * radius
+
+
+def blackbody_power(verts, faces, temperature):
+    """Total power radiated by an isothermal convex blackbody: sigma T^4 S.
+
+    This is the Stefan-Boltzmann law, and FlatLand must reproduce it WITHOUT
+    being told the surface area. Integrating the radiant intensity over all
+    directions and applying Cauchy's identity <A_proj> = S/4:
+
+        integral I dOmega = (sigma T^4 / pi) integral A_proj dOmega
+                          = (sigma T^4 / pi) (4 pi)(S / 4)
+                          = sigma T^4 S                              (exact)
+
+    So 4 pi times the direction-averaged integral FlatLand reports is the total
+    radiated power, for any convex shape.
+    """
+    return blackbody_exitance(temperature) * surface_area(verts, faces)
+
+
+# --- 2. Graded: T^4 affine in position, no terminator --------------------
+
+def graded_radiance_field(verts, source, temperature_max):
+    """A sphere whose fourth power of temperature varies affinely with position:
+
+        T(p)^4 = T_max^4 (1 + phat . shat) / 2
+
+    Hot at the pole facing `source`, falling smoothly to absolute zero at the
+    antipode, non-negative everywhere. The radiance is then LINEAR in the vertex
+    coordinates, so barycentric interpolation reproduces it exactly and the only
+    error left is the rasterizer's. That is the point of this case: it isolates
+    integration accuracy from field-representation accuracy.
+    """
+    s = unit(source)
+    L = blackbody_radiance(temperature_max)
+    return [0.5 * L * (1.0 + dot(unit(p), s)) for p in verts]
+
+
+def graded_sphere_intensity(temperature_max, radius, alpha_rad):
+    """Closed form for graded_radiance_field over a sphere.
+
+        I(alpha) = (sigma T_max^4 r^2 / 2) [1 + (2/3) cos(alpha)]
+
+    Derivation. With ehat the observer direction and L = (sigma T^4/2 pi)(1 + phat.shat),
+
+        I = r^2 integral_{phat.ehat > 0} L (phat . ehat) dOmega
+
+    Two standard hemisphere integrals do it:
+
+        integral_{hemi} (phat.ehat) dOmega                 = pi
+        integral_{hemi} (phat.shat)(phat.ehat) dOmega      = (2 pi / 3) cos(alpha)
+
+    The second follows by taking ehat = zhat and writing shat = sin(a) xhat +
+    cos(a) zhat: the xhat term dies on the phi integral, leaving
+    2 pi cos(a) integral_0^{pi/2} cos^2 sin dtheta = (2 pi/3) cos(a).
+
+    Substituting gives (sigma T^4 r^2 / 2 pi)[pi + (2 pi/3) cos a], as above.
+    """
+    return (0.5 * blackbody_exitance(temperature_max) * radius * radius
+            * (1.0 + (2.0/3.0) * math.cos(alpha_rad)))
+
+
+# --- 3. Radiative equilibrium: a real terminator -------------------------
+
+def equilibrium_radiance_field(verts, source, temperature_sub):
+    """A sphere in instantaneous radiative equilibrium with a distant source.
+
+    Absorbed flux per unit area goes as the incidence cosine, so balancing it
+    against sigma T^4 gives the classic subsolar law
+
+        T(psi) = T_sub cos^{1/4}(psi)      on the lit side, 0 beyond it
+
+    i.e. sigma T^4 = sigma T_sub^4 max(cos psi, 0). Unlike the graded case this
+    has a KINK at the terminator, which per-vertex linear interpolation cannot
+    represent exactly, so the error here converges with mesh refinement rather
+    than being limited by the rasterizer alone. That contrast is deliberate.
+    """
+    s = unit(source)
+    L = blackbody_radiance(temperature_sub)
+    return [L * max(0.0, dot(unit(p), s)) for p in verts]
+
+
+def lambert_phase(alpha_rad):
+    """The Lambert-sphere phase function, normalised to 1 at alpha = 0:
+
+        Phi(alpha) = [sin(alpha) + (pi - alpha) cos(alpha)] / pi
+
+    This is the disc-integrated brightness of a sphere whose emitted (or
+    diffusely scattered) radiance goes as the incidence cosine, seen at phase
+    angle alpha. Classical result; Russell, ApJ 43, 173 (1916) derives it for
+    planetary photometry. Checked against numerical quadrature in self_check.py.
+
+    Known values: Phi(0) = 1, Phi(pi/2) = 1/pi, Phi(pi) = 0.
+    """
+    a = alpha_rad
+    return (math.sin(a) + (math.pi - a) * math.cos(a)) / math.pi
+
+
+def equilibrium_sphere_intensity(temperature_sub, radius, alpha_rad):
+    """Closed form for equilibrium_radiance_field over a sphere.
+
+        I(alpha) = (2/3) sigma T_sub^4 r^2 Phi(alpha)
+
+    At alpha = 0 the integrand is cos^2 over the visible hemisphere, giving
+    (2 pi/3) r^2 L = (2/3) sigma T_sub^4 r^2; Phi carries the rest. Note the
+    value at alpha = 0 is 2/3 of the isothermal sphere at the same peak
+    temperature, the same 2/3 as the Lambertian mean cosine.
+    """
+    return ((2.0/3.0) * blackbody_exitance(temperature_sub) * radius * radius
+            * lambert_phase(alpha_rad))
 
 # --------------------------------------------------------------------------
 # Writers

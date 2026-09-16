@@ -1,6 +1,6 @@
 # Examples
 
-Five worked examples, written twice — once in Python, once in MATLAB — so the
+Six worked examples, written twice — once in Python, once in MATLAB — so the
 two are directly comparable. Each answers a question rather than touring an API.
 
 | | Question | Python | MATLAB |
@@ -10,6 +10,7 @@ two are directly comparable. Each answers a question rather than touring an API.
 | 3 | What is the integral of my scalar field over the visible part? | [`ex03_field_integral.py`](python/ex03_field_integral.py) | [`ex03_field_integral.m`](matlab/ex03_field_integral.m) |
 | 4 | I have hundreds of timesteps. How do I not wait all afternoon? | [`ex04_timeseries.py`](python/ex04_timeseries.py) | [`ex04_timeseries.m`](matlab/ex04_timeseries.m) |
 | 5 | I want to see the raster, not just the number. | [`ex05_heatmap.py`](python/ex05_heatmap.py) | [`ex05_heatmap.m`](matlab/ex05_heatmap.m) |
+| 6 | How do I know the number is right? | [`ex06_verification.py`](python/ex06_verification.py) | [`ex06_verification.m`](matlab/ex06_verification.m) |
 
 There is also an API tour in each binding — [`python/example.py`](../python/example.py)
 and [`matlab/example.m`](../matlab/example.m) — which walk the whole surface
@@ -29,6 +30,7 @@ checkout:
 ```shell
 python3 examples/python/ex01_projected_area.py
 python3 examples/python/ex05_heatmap.py /tmp/out      # writes images there
+python3 examples/python/ex06_verification.py          # exits non-zero if a check fails
 ```
 
 NumPy is optional. Everything runs without it; example 4 explains the one place
@@ -88,3 +90,6 @@ The meshes and field files the examples and tests use:
 
 For the analytic machinery behind the closed-form checks these examples make,
 see [`docs/VALIDATION.md`](../docs/VALIDATION.md) and `validation/cases.py`.
+Example 6 is a condensed, runnable version of that study: cube projected areas,
+Cauchy's identity, blackbody radiant intensity, the Stefan–Boltzmann law, and
+the phase curve of a sphere in radiative equilibrium.
