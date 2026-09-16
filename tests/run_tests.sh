@@ -7,7 +7,7 @@
 #   tests/run_tests.sh [path-to-flatland-binary] [suite ...]
 #
 # With no binary, builds one with `make`. With no suite names, runs them all.
-# Suites: geometry parsing cli batch
+# Suites: geometry parsing cli batch capi
 #
 # Examples:
 #   tests/run_tests.sh                       # build, run everything
@@ -21,13 +21,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-ALL_SUITES="geometry parsing cli batch"
+ALL_SUITES="geometry parsing cli batch capi"
 
 # First argument is the binary only if it looks like a path, not a suite name.
 BIN=""
 case "${1:-}" in
     "")                    ;;
-    geometry|parsing|cli|batch) ;;
+    geometry|parsing|cli|batch|capi) ;;
     *) BIN="$1"; shift     ;;
 esac
 SUITES="${*:-$ALL_SUITES}"

@@ -32,11 +32,6 @@ namespace flatland {
 
 namespace {
 
-struct RawMesh {
-    std::vector<Vec3<double>> vertices;
-    std::vector<Triangle3D> faces;
-};
-
 // A UTF-8 BOM is invisible in an editor but glued to the first token, so `v`
 // arrives as "\xEF\xBB\xBFv" and the line is dropped.
 void strip_bom(std::string& s) {
@@ -193,43 +188,6 @@ RawMesh load_stl_raw(const std::string& filename) {
     return mesh;
 }
 
-// Validate, recenter, and narrow to the working type.
-template <typename T>
-Mesh<T> finalize(RawMesh&& raw, const std::string& filename) {
-    if (raw.vertices.empty()) throw std::runtime_error("mesh '" + filename + "' contains no vertices");
-    if (raw.faces.empty())    throw std::runtime_error("mesh '" + filename + "' contains no faces");
-
-    const long long nv = (long long)raw.vertices.size();
-    for (const auto& f : raw.faces) {
-        if (f.v0_idx < 0 || f.v0_idx >= nv ||
-            f.v1_idx < 0 || f.v1_idx >= nv ||
-            f.v2_idx < 0 || f.v2_idx >= nv)
-            throw std::runtime_error("mesh '" + filename + "' references an out-of-range vertex index");
-    }
-
-    double lo[3] = { raw.vertices[0].x, raw.vertices[0].y, raw.vertices[0].z };
-    double hi[3] = { lo[0], lo[1], lo[2] };
-    for (const auto& p : raw.vertices) {
-        if (!is_finite(p))
-            throw std::runtime_error("mesh '" + filename + "' contains a non-finite vertex coordinate");
-        const double c[3] = { p.x, p.y, p.z };
-        for (int k = 0; k < 3; ++k) { lo[k] = std::min(lo[k], c[k]); hi[k] = std::max(hi[k], c[k]); }
-    }
-
-    Mesh<T> mesh;
-    mesh.origin = { 0.5*(lo[0]+hi[0]), 0.5*(lo[1]+hi[1]), 0.5*(lo[2]+hi[2]) };
-    if (!is_finite(mesh.origin))
-        throw std::runtime_error("mesh '" + filename + "' has a degenerate bounding box");
-
-    mesh.vertices.resize(raw.vertices.size());
-    for (size_t i = 0; i < raw.vertices.size(); ++i)
-        mesh.vertices[i] = { (T)(raw.vertices[i].x - mesh.origin.x),
-                             (T)(raw.vertices[i].y - mesh.origin.y),
-                             (T)(raw.vertices[i].z - mesh.origin.z) };
-    mesh.faces = std::move(raw.faces);
-    return mesh;
-}
-
 bool ends_with_ci(const std::string& s, const char* ext) {
     const size_t n = std::strlen(ext);
     if (s.size() < n) return false;
@@ -242,12 +200,12 @@ bool ends_with_ci(const std::string& s, const char* ext) {
 
 template <typename T>
 Mesh<T> load_obj(const std::string& filename) {
-    return finalize<T>(load_obj_raw(filename), filename);
+    return build_mesh<T>(load_obj_raw(filename), filename);
 }
 
 template <typename T>
 Mesh<T> load_stl(const std::string& filename) {
-    return finalize<T>(load_stl_raw(filename), filename);
+    return build_mesh<T>(load_stl_raw(filename), filename);
 }
 
 // Dispatch by file extension (.stl -> STL, otherwise OBJ).

@@ -3,6 +3,7 @@
 #include "fl_field.hpp"
 #include "fl_image.hpp"
 #include "fl_io.hpp"
+#include "fl_parallel.hpp"
 #include "fl_project.hpp"
 #include "fl_raster.hpp"
 
@@ -140,10 +141,6 @@ void run_app(const std::string& obj, const std::string& default_data, const std:
         view_res[k] = (batch[k].resolution > 0) ? (T)batch[k].resolution : (T)default_res;
 
     std::vector<ViewResult<T>> results(batch.size());
-    std::atomic<size_t> next{0};
-    std::mutex err_mtx;
-    std::string err_msg;
-    size_t err_k = std::numeric_limits<size_t>::max();
 
     // Images are written as they are produced, so peak memory stays O(threads)
     // rather than O(timesteps). If the batch then fails we remove what was
@@ -152,80 +149,50 @@ void run_app(const std::string& obj, const std::string& default_data, const std:
     std::mutex img_mtx;
     std::vector<std::string> written_images;
 
-    // Worker: pull timestep indices off a shared counter. Each owns a renderer and
-    // a reusable field buffer.
-    auto worker = [&]() {
-        Renderer<T> renderer;
-        Field<T> local;            // column extracted for the current view
-        size_t k;
-        while ((k = next.fetch_add(1)) < batch.size()) {
-            try {
-                const auto& b = batch[k];
-                const std::string& token = b.data_file.empty() ? default_data : b.data_file;
-
-                const Field<T>* fp = nullptr;
-                if (!token.empty()) {
-                    FieldToken ft = parse_field_token(token);
-                    auto mat = get_matrix(ft.path);           // shared, loaded once
-                    extract_column(*mat, ft.col, local);
-                    fp = &local;
-                }
-
-                ViewResult<T> r = process_view<T>({(T)b.nx, (T)b.ny, (T)b.nz}, mesh, fp,
-                                                  view_res[k], cull, renderer);
-
-                // A view that covered nothing has no raster to write. Writing one
-                // anyway would emit the previous view's image, or a malformed 0x0
-                // file; the JSON reports image: null instead.
-                if (!out_pre.empty() && r.image_width > 0 && r.image_height > 0) {
-                    std::ostringstream oss; oss << out_pre << "_" << std::setw(4) << std::setfill('0') << k << ".ppm";
-                    r.output_image = oss.str();
-                    save_ppm(renderer, r.output_image, r.min_val, r.max_val, r.has_stats);
-                    std::lock_guard<std::mutex> lk(img_mtx);
-                    written_images.push_back(r.output_image);
-                }
-                results[k] = std::move(r);
-            } catch (const std::exception& e) {
-                std::lock_guard<std::mutex> lk(err_mtx);
-                // Keep the LOWEST-indexed failure, not whichever thread arrived
-                // first, so the same input always produces the same message.
-                if (k < err_k) {
-                    err_k = k;
-                    err_msg = "timestep " + std::to_string(k) + ": " + e.what();
-                }
-                next.store(batch.size());   // signal other workers to stop
-                return;
-            }
-        }
-    };
-
-    const unsigned n_workers = std::max(1u, std::min<unsigned>(threads, (unsigned)batch.size()));
+    const unsigned n_workers = choose_workers(batch.size(), threads);
     if (!json)
         std::cerr << "Running " << batch.size() << " view(s) with "
                   << (sizeof(T)==4 ? "float" : "double") << " precision on "
                   << n_workers << " thread(s)...\n";
 
-    if (n_workers <= 1) {
-        worker();
-    } else {
-        std::vector<std::thread> pool;
-        pool.reserve(n_workers);
-        try {
-            for (unsigned t=0; t<n_workers; ++t) pool.emplace_back(worker);
-        } catch (const std::system_error&) {
-            // The OS refused a thread. Join what did start rather than unwinding
-            // through a vector of joinable threads, which calls std::terminate.
-            next.store(batch.size());
-            for (auto& th : pool) if (th.joinable()) th.join();
-            throw std::runtime_error("could not start " + std::to_string(n_workers) +
-                                     " worker threads; try a smaller -t/--threads");
-        }
-        for (auto& th : pool) th.join();
-    }
+    // Per-worker scratch, indexed by the id parallel_for hands each worker.
+    // Keeping it here rather than in thread_local storage means it is released
+    // when this call returns, and makes the ownership obvious.
+    std::vector<Renderer<T>> renderers(n_workers);
+    std::vector<Field<T>> locals(n_workers);
 
-    if (!err_msg.empty()) {
+    try {
+        parallel_for(batch.size(), n_workers, [&](size_t k, unsigned w) {
+            const auto& b = batch[k];
+            const std::string& token = b.data_file.empty() ? default_data : b.data_file;
+
+            const Field<T>* fp = nullptr;
+            if (!token.empty()) {
+                FieldToken ft = parse_field_token(token);
+                auto mat = get_matrix(ft.path);           // shared, loaded once
+                extract_column(*mat, ft.col, locals[w]);
+                fp = &locals[w];
+            }
+
+            ViewResult<T> r = process_view<T>({(T)b.nx, (T)b.ny, (T)b.nz}, mesh, fp,
+                                              view_res[k], cull, renderers[w]);
+
+            // A view that covered nothing has no raster to write. Writing one
+            // anyway would emit the previous view's image, or a malformed 0x0
+            // file; the JSON reports image: null instead.
+            if (!out_pre.empty() && r.image_width > 0 && r.image_height > 0) {
+                std::ostringstream oss;
+                oss << out_pre << "_" << std::setw(4) << std::setfill('0') << k << ".ppm";
+                r.output_image = oss.str();
+                save_ppm(renderers[w], r.output_image, r.min_val, r.max_val, r.has_stats);
+                std::lock_guard<std::mutex> lk(img_mtx);
+                written_images.push_back(r.output_image);
+            }
+            results[k] = std::move(r);
+        });
+    } catch (const ParallelError& e) {
         for (const auto& p : written_images) std::remove(p.c_str());
-        throw std::runtime_error(err_msg);
+        throw std::runtime_error("timestep " + std::to_string(e.index) + ": " + e.what());
     }
 
     // Emit results in view order (after compute, so threaded output stays ordered).

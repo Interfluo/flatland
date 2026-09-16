@@ -2,6 +2,11 @@
 /build/
 src/build/
 /flatland
+/libflatland.a
+/libflatland.so*
+/libflatland.dylib
+/flatland.dll
+/flatland.lib
 *.o
 *.d
 *.ppm
