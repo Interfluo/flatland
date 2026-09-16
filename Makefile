@@ -16,6 +16,7 @@ CC       ?= cc
 CXXFLAGS ?= -std=c++17 -O2 -Wall
 LDFLAGS  ?= -pthread
 PREFIX   ?= /usr/local
+PYTHON   ?= python3
 
 INCLUDES  = -Isrc -Iinclude
 
@@ -40,20 +41,31 @@ LIB_PIC  = $(CORE_SRC:.cpp=.pic.o) $(CAPI_SRC:.cpp=.pic.o)
 
 DEP      = $(CORE_OBJ:.o=.d) $(CAPI_OBJ:.o=.d) $(CLI_OBJ:.o=.d) $(LIB_PIC:.o=.d)
 
-BIN       = flatland
 STATICLIB = libflatland.a
 
-# macOS wants .dylib and a different soname flag; everything else gets .so.
+# Platform naming. macOS wants .dylib and -install_name; Windows (MinGW/MSYS2/
+# Cygwin) wants a .dll plus a separate import library, has no -soname, and puts
+# an .exe suffix on executables whether asked to or not — so the CLI target has
+# to carry that suffix, otherwise make never sees the file it just built.
 UNAME_S := $(shell uname -s)
+EXE       =
+IMPLIB    =
 ifeq ($(UNAME_S),Darwin)
   SHAREDLIB = libflatland.dylib
   SOFLAGS   = -dynamiclib -install_name @rpath/$(SHAREDLIB)
+else ifneq (,$(filter MINGW% MSYS% CYGWIN%,$(UNAME_S)))
+  EXE       = .exe
+  SHAREDLIB = flatland.dll
+  IMPLIB    = libflatland.dll.a
+  SOFLAGS   = -shared -Wl,--out-implib,$(IMPLIB)
 else
   SHAREDLIB = libflatland.so
   SOFLAGS   = -shared -Wl,-soname,$(SHAREDLIB)
 endif
 
-.PHONY: all lib test test-cli test-capi install clean
+BIN       = flatland$(EXE)
+
+.PHONY: all lib test validate install clean
 
 $(BIN): $(CORE_OBJ) $(CLI_OBJ)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
@@ -70,24 +82,39 @@ $(SHAREDLIB): $(LIB_PIC)
 	$(CXX) $(CXXFLAGS) $(SOFLAGS) $^ -o $@ $(LDFLAGS)
 
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(FL_API_DEF) -MMD -MP -c $< -o $@
 
 %.pic.o: %.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -fPIC -fvisibility=hidden -MMD -MP -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(FL_API_DEF) -fPIC -fvisibility=hidden -MMD -MP -c $< -o $@
+
+# The C ABI's only Windows-visible difference between the two libraries is which
+# way FL_API points, and that is decided per object file, not per source file.
+# The plain .o goes into the static archive (no dllexport); the .pic.o goes into
+# the shared library (dllexport). On ELF/Mach-O both expand to nothing useful --
+# FL_API is visibility("default") regardless -- so this costs nothing there.
+src/capi.o:     FL_API_DEF = -DFLATLAND_STATIC=1
+src/capi.pic.o: FL_API_DEF = -DFLATLAND_BUILD_SHARED=1
 
 -include $(DEP)
 
 test: $(BIN) $(STATICLIB)
 	./tests/run_tests.sh ./$(BIN)
 
+# The full validation study against closed-form results, including the
+# convergence sweeps behind docs/VALIDATION.md. `make test` runs a quick subset.
+validate: $(BIN)
+	$(PYTHON) validation/self_check.py
+	$(PYTHON) validation/run_validation.py --flatland ./$(BIN)
+
 install: $(BIN) lib
 	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib $(DESTDIR)$(PREFIX)/include
 	install -m 755 $(BIN) $(DESTDIR)$(PREFIX)/bin/
 	install -m 644 $(STATICLIB) $(DESTDIR)$(PREFIX)/lib/
 	install -m 755 $(SHAREDLIB) $(DESTDIR)$(PREFIX)/lib/
+	$(if $(IMPLIB),install -m 644 $(IMPLIB) $(DESTDIR)$(PREFIX)/lib/)
 	install -m 644 include/flatland.h $(DESTDIR)$(PREFIX)/include/
 
 clean:
-	rm -f $(BIN) $(STATICLIB) $(SHAREDLIB) \
+	rm -f $(BIN) $(STATICLIB) $(SHAREDLIB) $(IMPLIB) \
 	      $(CORE_OBJ) $(CAPI_OBJ) $(CLI_OBJ) $(LIB_PIC) $(DEP) \
 	      tests/capi_test
